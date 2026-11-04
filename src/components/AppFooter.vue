@@ -39,14 +39,14 @@ function openKYAModal() {
         >Contracts</a
       >
       <a
-        href="https://github.com/capt-nemo429/sigmafi-ui"
+        href="https://github.com/nautls/sigmafi"
         class="link link-hover"
         target="_blank"
         rel="noopener noreferrer"
         >User Interface</a
       >
       <a
-        href="https://github.com/capt-nemo429/sigmafi-ui/blob/main/src/offchain/plugins.ts"
+        href="https://github.com/nautls/sigmafi/blob/main/src/offchain/plugins.ts"
         class="link link-hover"
         target="_blank"
         rel="noopener noreferrer"
@@ -63,7 +63,7 @@ function openKYAModal() {
         >Twitter</a
       >
       <a
-        href="https://github.com/capt-nemo429"
+        href="https://github.com/nautls"
         class="link link-hover"
         target="_blank"
         rel="noopener noreferrer"
