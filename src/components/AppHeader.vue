@@ -66,7 +66,6 @@ const ergBalance = computed(() => {
                   width="24"
                   height="24"
                 />
-                <img v-else src="@/assets/safew.png" width="24" height="24" />
               </template>
             </a>
             <ul class="p-2 bg-base-100 shadow-md w-full">
@@ -79,15 +78,6 @@ const ergBalance = computed(() => {
                     <div class="flex-grow text-left">Nautilus</div>
                     <img src="@/assets/nautilus.svg?url" class="w-5 h-5" />
                   </a>
-                </li>
-                <li>
-                  <a
-                    :class="{ 'opacity-50': !wallet.wallets.safew }"
-                    @click="wallet.connect('safew')"
-                  >
-                    <div class="flex-grow text-left">SAFEW</div>
-                    <img src="@/assets/safew.png" class="w-5 h-5"
-                  /></a>
                 </li>
               </template>
               <li v-else><a @click="wallet.disconnect()">Disconnect</a></li>
