@@ -14,7 +14,9 @@ import { addressUrlFor, shortenString } from "@/utils";
 import { formatBigNumber, Order, sendTransaction } from "@/utils";
 
 const IPFS_PROTOCOL_PREFIX = "ipfs://";
-const IPFS_GENERAL_GATEWAY = "https://cloudflare-ipfs.com/ipfs/";
+const IPFS_GENERAL_GATEWAY = "https://ipfs.filebase.io/ipfs/";
+// public gateways that are shut down or heavily rate-limited
+const IPFS_DEPRECATED_GATEWAYS = /^https?:\/\/(cloudflare-ipfs\.com|ipfs\.io|dweb\.link)\/ipfs\//;
 
 const wallet = useWalletStore();
 
@@ -32,11 +34,11 @@ function resolveIpfs(url?: string): string {
     return "";
   }
 
-  if (!url.startsWith(IPFS_PROTOCOL_PREFIX)) {
-    return url;
-  } else {
+  if (url.startsWith(IPFS_PROTOCOL_PREFIX)) {
     return url.replace(IPFS_PROTOCOL_PREFIX, IPFS_GENERAL_GATEWAY);
   }
+
+  return url.replace(IPFS_DEPRECATED_GATEWAYS, IPFS_GENERAL_GATEWAY);
 }
 
 const nftBackgroundUrl = computed(() => {
