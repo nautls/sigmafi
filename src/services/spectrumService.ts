@@ -29,8 +29,7 @@ export type SpectrumLockedValue = {
   decimals: number;
 };
 
-// https://api.spectrum.fi/v1/docs
-const BASE_URL = "https://api.spectrum.fi";
+const BASE_URL = "https://dex-api.sigmaspace.io";
 export const SPECTRUM_ERG_TOKEN_ID =
   "0000000000000000000000000000000000000000000000000000000000000000";
 

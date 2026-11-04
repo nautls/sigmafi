@@ -11,6 +11,8 @@ import { get } from "@/utils";
 const _1 = BigNumber(1);
 const MIN_USD_LIQUIDITY = 10_000;
 const COINGECKO_BASE_URI = "https://api.coingecko.com/api/";
+const ERG_FIAT_RATE_CACHE_KEY = "ergFiatRate";
+const ERG_FIAT_RATE_MAX_AGE_MS = 60 * 60 * 1000; // 1 hour
 
 const HODLERG3_TOKEN_ID = "cbd75cfe1a4f37f9a22eaee516300e36ea82017073036f07a09c1d2e10277cda";
 const HODLERG3_NFT_ID = "6e9c85c4be018b1308ddf034baf1406490e2a9dd406c01591bd6df41e98b6057";
@@ -24,14 +26,43 @@ export type AssetPriceRates = {
   [tokenId: string]: AssetRate;
 };
 
-async function getErgRateFromCoingGecko(): Promise<number> {
-  const data = await get(new URL("v3/simple/price", COINGECKO_BASE_URI), {
-    ids: "ergo",
-    // eslint-disable-next-line @typescript-eslint/naming-convention
-    vs_currencies: "usd"
-  });
+type CachedRate = { rate: number; timestamp: number };
 
-  return data.ergo.usd;
+function getCachedErgFiatRate(): number | undefined {
+  try {
+    const cached: CachedRate | null = JSON.parse(
+      localStorage.getItem(ERG_FIAT_RATE_CACHE_KEY) || "null"
+    );
+    if (!cached || Date.now() - cached.timestamp > ERG_FIAT_RATE_MAX_AGE_MS) return;
+
+    return cached.rate;
+  } catch {
+    return;
+  }
+}
+
+function cacheErgFiatRate(rate: number) {
+  const cached: CachedRate = { rate, timestamp: Date.now() };
+  localStorage.setItem(ERG_FIAT_RATE_CACHE_KEY, JSON.stringify(cached));
+}
+
+async function getErgRateFromCoingGecko(): Promise<number | undefined> {
+  try {
+    const data = await get(new URL("v3/simple/price", COINGECKO_BASE_URI), {
+      ids: "ergo",
+      // eslint-disable-next-line @typescript-eslint/naming-convention
+      vs_currencies: "usd"
+    });
+
+    const rate: number = data.ergo.usd;
+    cacheErgFiatRate(rate);
+
+    return rate;
+  } catch {
+    // CoinGecko's public API rate-limits and blocks browsers aggressively, and
+    // these error responses carry no CORS headers. Let callers fall back.
+    return;
+  }
 }
 
 async function getTokenRatesFromSpectrum(): Promise<Map<string, BigNumber>> {
@@ -97,11 +128,13 @@ class AssetPricingService {
   }
 
   public async getTokenRates(): Promise<AssetPriceRates> {
-    const [ergFiatRate, tokenRates, hodlergRate] = await Promise.all([
+    const [coingeckoRate, tokenRates, hodlergRate] = await Promise.all([
       getErgRateFromCoingGecko(),
       getTokenRatesFromSpectrum(),
       getHodlErg3TokenRate()
     ]);
+
+    const ergFiatRate = coingeckoRate ?? getCachedErgFiatRate() ?? 0;
 
     const map: AssetPriceRates = { [ERG_TOKEN_ID]: { erg: 1, fiat: ergFiatRate } };
 
