@@ -912,13 +912,13 @@ const historyEmptyTitle = computed(() => {
             <activity-icon class="h-5 w-5" />
           </div>
           <p class="sf-serif mt-3 text-[18px] font-medium text-[color:var(--sf-ink)]">
-            {{ connected ? `No ${market} orders match these filters` : "Connect to Lithos feed" }}
+            {{ connected ? `No ${market} orders match these filters` : "Connecting to Ergo feed" }}
           </p>
           <p class="mt-1 max-w-sm text-[12.5px] text-[color:var(--sf-muted)]">
             {{
               connected
                 ? `Try lowering minimum cover below ${coverage}%, toggling off Matchable only, or switching markets.`
-                : "Start the local Lithos client or set a feed URL in the top bar to stream live zero-coupon curves."
+                : "Configure an Ergo GraphQL endpoint (or Lithos client URL) in the top bar to stream live zero-coupon curves."
             }}
           </p>
         </div>

@@ -538,10 +538,12 @@ function isUsable(x: { ok: boolean; status?: string; reasons?: string[] }) {
       <div v-else class="px-6 py-12 text-center text-[13px] text-[color:var(--sf-muted)]">
         {{
           fillsStatus === "not-configured"
-            ? "Fill history indexing is not configured on this Lithos node."
-            : fillsStatus === "disabled"
-              ? "Fill history indexing is disabled."
-              : `No confirmed ${market} fills in the last 10 days.`
+            ? "Fill history indexing is not configured on this data feed."
+            : fillsStatus === "unavailable"
+              ? "Fill history could not be loaded from the data feed."
+              : fillsStatus === "disabled"
+                ? "Fill history indexing is disabled."
+                : `No confirmed ${market} fills in the last 10 days.`
         }}
       </div>
     </div>

@@ -1,6 +1,22 @@
+import { ErgoAddress } from "@fleet-sdk/core";
+import { blake2b256, hex } from "@fleet-sdk/crypto";
 import { acceptHMRUpdate, defineStore } from "pinia";
-import { computed, reactive, ref } from "vue";
-import { getZcBaseUrl, setZcBaseUrl, zcApi } from "@/services/zcApi";
+import { computed, reactive, ref, watch } from "vue";
+import { useWalletStore } from "./walletStore";
+import { ERG_TOKEN_ID } from "@/constants";
+import {
+  getDefaultZcGraphqlUrl,
+  getZcBaseUrl,
+  getZcDataSource,
+  getZcGraphqlUrl,
+  resetZcEngine,
+  setZcBaseUrl,
+  setZcDataSource,
+  setZcGraphqlUrl,
+  setZcWalletProvider,
+  zcApi,
+  ZcDataSource
+} from "@/services/zcApi";
 import {
   ZcAuctionLotSummary,
   ZcAuctionVaultSummary,
@@ -20,6 +36,21 @@ const MARKET_STORAGE_KEY = "sigmafi.zc.market";
 const UNIT_STORAGE_KEY = "sigmafi.zc.unit";
 const POLL_MS = 20_000;
 
+const ADDRESS_HASH_CACHE = new Map<string, string>();
+
+function hashAddress(base58: string): string | null {
+  const cached = ADDRESS_HASH_CACHE.get(base58);
+  if (cached) return cached;
+  try {
+    const treeHex = ErgoAddress.fromBase58(base58).ergoTree;
+    const hashed = hex.encode(blake2b256(hex.decode(treeHex)));
+    ADDRESS_HASH_CACHE.set(base58, hashed);
+    return hashed;
+  } catch {
+    return null;
+  }
+}
+
 function emptySnapshot(market: ZcMarket): ZcMarketSnapshot {
   return {
     market,
@@ -34,6 +65,8 @@ function emptySnapshot(market: ZcMarket): ZcMarketSnapshot {
 }
 
 export const useZcStore = defineStore("zc", () => {
+  const wallet = useWalletStore();
+
   const connected = ref(false);
   const loading = ref(true);
   const error = ref<string | null>(null);
@@ -43,8 +76,37 @@ export const useZcStore = defineStore("zc", () => {
   const height = ref(0);
   const revision = ref(0);
   const refreshSeq = ref(0);
+  const dataSource = ref<ZcDataSource>(getZcDataSource());
+  const graphqlUrl = ref(getZcGraphqlUrl());
+  const defaultGraphqlUrl = getDefaultZcGraphqlUrl();
   const baseUrl = ref(getZcBaseUrl());
   const defaults = ref<Record<string, string | number>>({});
+
+  // Wire Nautilus wallet addresses & balances into the client-side GraphQL ZC engine
+  // so `mine`, `borrowedByMe`, and `getPortfolio()` reflect the connected wallet.
+  setZcWalletProvider(() => {
+    const hashes = new Set<string>();
+    const addrs = [
+      ...wallet.usedAddresses,
+      ...(wallet.changeAddress ? [wallet.changeAddress] : [])
+    ];
+    for (const addr of addrs) {
+      const h = hashAddress(addr);
+      if (h) hashes.add(h);
+    }
+
+    let nanoErg = 0n;
+    const tokens: { tokenId: string; amount: bigint }[] = [];
+    for (const asset of wallet.balance) {
+      if (asset.tokenId === ERG_TOKEN_ID) {
+        nanoErg += asset.amount;
+      } else if (asset.amount > 0n) {
+        tokens.push({ tokenId: asset.tokenId.toLowerCase(), amount: asset.amount });
+      }
+    }
+
+    return { hashes, nanoErg, tokens };
+  });
 
   const oracle = reactive({
     price: 0,
@@ -134,6 +196,21 @@ export const useZcStore = defineStore("zc", () => {
     } catch {
       // ignore
     }
+  }
+
+  function updateDataSource(source: ZcDataSource) {
+    setZcDataSource(source);
+    dataSource.value = getZcDataSource();
+    resetZcEngine();
+    revision.value = 0;
+    void poll(true);
+  }
+
+  function updateGraphqlUrl(url: string) {
+    setZcGraphqlUrl(url);
+    graphqlUrl.value = getZcGraphqlUrl();
+    revision.value = 0;
+    void poll(true);
   }
 
   function updateBaseUrl(url: string) {
@@ -252,11 +329,24 @@ export const useZcStore = defineStore("zc", () => {
     } catch (err) {
       connected.value = false;
       loading.value = false;
-      error.value = err instanceof Error ? err.message : "Lithos client unreachable";
+      const fallbackMsg =
+        dataSource.value === "graphql" ? "Ergo GraphQL unreachable" : "Lithos client unreachable";
+      error.value = err instanceof Error ? err.message : fallbackMsg;
     } finally {
       inFlight = false;
     }
   }
+
+  // Re-evaluate `mine` / `borrowedByMe` ownership flags when Nautilus connects/disconnects.
+  watch(
+    [() => wallet.connected, () => wallet.changeAddress, () => wallet.usedAddresses.length],
+    () => {
+      if (connected.value && dataSource.value === "graphql") {
+        refreshSeq.value += 1;
+        void Promise.all([fetchMarket("ERG"), fetchMarket("SigUSD")]).catch(() => undefined);
+      }
+    }
+  );
 
   function start() {
     subscribers += 1;
@@ -286,6 +376,9 @@ export const useZcStore = defineStore("zc", () => {
     height,
     revision,
     refreshSeq,
+    dataSource,
+    graphqlUrl,
+    defaultGraphqlUrl,
     baseUrl,
     defaults,
     oracle,
@@ -302,6 +395,8 @@ export const useZcStore = defineStore("zc", () => {
     totalOrdersCount,
     setActiveMarket,
     setDurationUnit,
+    updateDataSource,
+    updateGraphqlUrl,
     updateBaseUrl,
     refresh: () => poll(true),
     start,

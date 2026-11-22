@@ -1,3 +1,11 @@
+import { Network } from "@fleet-sdk/common";
+import { ZcApiError } from "./zc/errors";
+import {
+  DEFAULT_MAINNET_GRAPHQL_URL,
+  DEFAULT_TESTNET_GRAPHQL_URL
+} from "./zc/graphqlClient";
+import { ZcGraphqlEngine, ZcWalletProvider } from "./zc/reads";
+import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
   ZcAskSummary,
   ZcAuctionLotSummary,
@@ -18,6 +26,7 @@ import {
   ZcSearchHit,
   ZcSimulateResponse
 } from "@/types/zc";
+import { getNetworkType } from "@/utils/otherUtils";
 import {
   DAY_BLOCKS,
   fromErg,
@@ -29,8 +38,19 @@ import {
   toMarket
 } from "@/utils/zcMath";
 
+export { ZcApiError, DEFAULT_MAINNET_GRAPHQL_URL, DEFAULT_TESTNET_GRAPHQL_URL };
+export type { ZcWalletProvider };
+
+export type ZcDataSource = "graphql" | "lithos";
+
+const DATA_SOURCE_KEY = "sigmafi.zc.dataSource";
+const GRAPHQL_URL_KEY = "sigmafi.zc.graphqlUrl";
 const BASE_URL_KEY = "sigmafi.zc.baseUrl";
 const API_KEY_STORAGE = "sigmafi.zc.apiKey";
+
+const VERIFIED_META_BY_ID = new Map(
+  VERIFIED_ASSETS.map((a) => [a.tokenId.toLowerCase(), a.metadata])
+);
 
 export interface ZcTokenMeta {
   id: string;
@@ -41,16 +61,51 @@ export interface ZcTokenMeta {
   kind?: string;
 }
 
-export class ZcApiError extends Error {
-  status: number;
-  data: unknown;
+export function getDefaultZcGraphqlUrl(): string {
+  const envUrl = import.meta.env.VITE_ERGO_GRAPHQL_URL;
+  if (typeof envUrl === "string" && envUrl.trim()) return envUrl.trim();
+  return getNetworkType() === Network.Mainnet
+    ? DEFAULT_MAINNET_GRAPHQL_URL
+    : DEFAULT_TESTNET_GRAPHQL_URL;
+}
 
-  constructor(message: string, status: number, data?: unknown) {
-    super(message);
-    this.name = "ZcApiError";
-    this.status = status;
-    this.data = data;
+export function getZcDataSource(): ZcDataSource {
+  try {
+    const stored = localStorage.getItem(DATA_SOURCE_KEY);
+    if (stored === "lithos" || stored === "graphql") return stored;
+  } catch {
+    // storage unavailable
   }
+  return "graphql";
+}
+
+export function setZcDataSource(source: ZcDataSource): void {
+  try {
+    localStorage.setItem(DATA_SOURCE_KEY, source);
+  } catch {
+    // storage unavailable
+  }
+}
+
+export function getZcGraphqlUrl(): string {
+  try {
+    const stored = localStorage.getItem(GRAPHQL_URL_KEY);
+    if (stored !== null && stored.trim()) return stored.trim();
+  } catch {
+    // storage unavailable
+  }
+  return getDefaultZcGraphqlUrl();
+}
+
+export function setZcGraphqlUrl(url: string): void {
+  const clean = url.trim();
+  try {
+    if (clean) localStorage.setItem(GRAPHQL_URL_KEY, clean);
+    else localStorage.removeItem(GRAPHQL_URL_KEY);
+  } catch {
+    // storage unavailable
+  }
+  zcGraphqlEngine.setEndpoint(clean || getDefaultZcGraphqlUrl());
 }
 
 export function getZcBaseUrl(): string {
@@ -91,6 +146,20 @@ export function setZcApiKey(key: string): void {
   }
 }
 
+export const zcGraphqlEngine = new ZcGraphqlEngine(getZcGraphqlUrl());
+
+export function setZcWalletProvider(provider: ZcWalletProvider): void {
+  zcGraphqlEngine.setWalletProvider(provider);
+}
+
+export function resetZcEngine(): void {
+  zcGraphqlEngine.reset();
+}
+
+function useGraphql(): boolean {
+  return getZcDataSource() === "graphql";
+}
+
 function buildQuery(params?: Record<string, string | number | boolean | undefined | null>): string {
   if (!params) return "";
   const sp = new URLSearchParams();
@@ -103,7 +172,7 @@ function buildQuery(params?: Record<string, string | number | boolean | undefine
   return s ? `?${s}` : "";
 }
 
-async function zcRequest<T>(
+async function lithosRequest<T>(
   path: string,
   options?: {
     method?: "GET" | "POST";
@@ -169,11 +238,16 @@ function adaptCollateral(col: any, tokenMap: Record<string, ZcTokenMeta> = {}): 
       usd += fromRaw(t.amount, 2) ?? 0;
     } else {
       const meta = tokenMap[id];
-      const decimals = meta?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
+      const knownMeta = VERIFIED_META_BY_ID.get(id);
+      const decimals = meta?.decimals ?? knownMeta?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
       tokens.push({
         id,
-        ticker: meta?.ticker || meta?.name || (id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
-        name: meta?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
+        ticker:
+          meta?.ticker ||
+          meta?.name ||
+          knownMeta?.name ||
+          (id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
+        name: meta?.name || knownMeta?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
         decimals,
         amount: fromRaw(t.amount, decimals) ?? 0,
         rawAmount: String(t.amount ?? "0"),
@@ -571,7 +645,10 @@ export function buildWalletLendDraft(params: {
 
 export const zcApi = {
   getInfo(ifRevision?: number, signal?: AbortSignal) {
-    return zcRequest<ZcInfoResponse>("/sigmafi/zc/info", {
+    if (useGraphql()) {
+      return zcGraphqlEngine.getInfo(ifRevision, signal);
+    }
+    return lithosRequest<ZcInfoResponse>("/sigmafi/zc/info", {
       query: { ifRevision },
       allowNotModified: ifRevision != null,
       signal
@@ -583,10 +660,12 @@ export const zcApi = {
     params?: { coverage?: number; kind?: string; matchable?: boolean; grid?: boolean },
     signal?: AbortSignal
   ): Promise<ZcCurves> {
-    const res = (await zcRequest<ZcRawCurvesResponse>(`/sigmafi/zc/markets/${market}/curves`, {
-      query: params,
-      signal
-    })) as ZcRawCurvesResponse;
+    const res = useGraphql()
+      ? await zcGraphqlEngine.getCurvesRaw(market, params, signal)
+      : ((await lithosRequest<ZcRawCurvesResponse>(`/sigmafi/zc/markets/${market}/curves`, {
+          query: params,
+          signal
+        })) as ZcRawCurvesResponse);
     return adaptCurves(res, market);
   },
 
@@ -603,10 +682,12 @@ export const zcApi = {
     },
     signal?: AbortSignal
   ): Promise<ZcOrderbook> {
-    const res = await zcRequest<unknown>(`/sigmafi/zc/markets/${market}/orderbook`, {
-      query: params,
-      signal
-    });
+    const res = useGraphql()
+      ? await zcGraphqlEngine.getOrderbookRaw(market, params, signal)
+      : await lithosRequest<unknown>(`/sigmafi/zc/markets/${market}/orderbook`, {
+          query: params,
+          signal
+        });
     return adaptOrderbook(res, market, params?.band ?? null, params?.to != null);
   },
 
@@ -627,10 +708,13 @@ export const zcApi = {
     signal?: AbortSignal
   ): Promise<ZcPagedResult<ZcAskSummary>> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<any>(`/sigmafi/zc/markets/${market}/asks`, {
-      query: params,
-      signal
-    })) as { items?: unknown[]; total?: number; next?: string | null; pendingLeftOut?: number };
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.listAsksRaw(market, params, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<any>(`/sigmafi/zc/markets/${market}/asks`, {
+          query: params,
+          signal
+        })) as { items?: unknown[]; total?: number; next?: string | null; pendingLeftOut?: number };
     const list = res?.items || [];
     return {
       items: list.map((x) => adaptAskSummary(x, tokenMap)),
@@ -674,10 +758,13 @@ export const zcApi = {
     signal?: AbortSignal
   ): Promise<ZcPagedResult<ZcOfferSummary>> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<any>(`/sigmafi/zc/markets/${market}/offers`, {
-      query: params,
-      signal
-    })) as { items?: unknown[]; total?: number; next?: string | null; pendingLeftOut?: number };
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.listOffersRaw(market, params, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<any>(`/sigmafi/zc/markets/${market}/offers`, {
+          query: params,
+          signal
+        })) as { items?: unknown[]; total?: number; next?: string | null; pendingLeftOut?: number };
     const list = res?.items || [];
     return {
       items: list.map(adaptOfferSummary),
@@ -711,10 +798,13 @@ export const zcApi = {
     signal?: AbortSignal
   ): Promise<ZcFillsResponse> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<any>(`/sigmafi/zc/markets/${market}/fills`, {
-      query: params,
-      signal
-    })) as { items?: unknown[]; status?: string; indexedTo?: number | null };
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.listFillsRaw(market, params, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<any>(`/sigmafi/zc/markets/${market}/fills`, {
+          query: params,
+          signal
+        })) as { items?: unknown[]; status?: string; indexedTo?: number | null };
     return {
       items: (res?.items || []).map(adaptFillSummary),
       status: res?.status || "ready",
@@ -732,7 +822,10 @@ export const zcApi = {
   },
 
   async simulate(draft: Record<string, unknown>, signal?: AbortSignal): Promise<ZcSimulateResponse> {
-    return (await zcRequest<ZcSimulateResponse>("/sigmafi/zc/simulate", {
+    if (useGraphql()) {
+      return (await zcGraphqlEngine.simulateRaw(draft, signal)) as unknown as ZcSimulateResponse;
+    }
+    return (await lithosRequest<ZcSimulateResponse>("/sigmafi/zc/simulate", {
       method: "POST",
       body: { draft },
       signal
@@ -740,7 +833,10 @@ export const zcApi = {
   },
 
   async getMatches(id: string, signal?: AbortSignal): Promise<ZcMatchesResponse> {
-    return (await zcRequest<ZcMatchesResponse>(`/sigmafi/zc/matches/${encodeURIComponent(id)}`, {
+    if (useGraphql()) {
+      return (await zcGraphqlEngine.getMatchesRaw(id, signal)) as unknown as ZcMatchesResponse;
+    }
+    return (await lithosRequest<ZcMatchesResponse>(`/sigmafi/zc/matches/${encodeURIComponent(id)}`, {
       signal
     })) as ZcMatchesResponse;
   },
@@ -757,9 +853,12 @@ export const zcApi = {
     spentBy?: string;
   } | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const raw = (await zcRequest<any>(`/sigmafi/zc/lookup/${encodeURIComponent(id)}`, {
-      signal
-    })) as Record<string, unknown>;
+    const raw = (useGraphql()
+      ? await zcGraphqlEngine.lookupRaw(id, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<any>(`/sigmafi/zc/lookup/${encodeURIComponent(id)}`, {
+          signal
+        })) as Record<string, unknown>;
     if (!raw) return null;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rec = (raw.record as any)?.current || raw.record;
@@ -789,10 +888,13 @@ export const zcApi = {
 
   async search(q: string, signal?: AbortSignal): Promise<ZcSearchHit[]> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<{ hits?: any[] }>("/sigmafi/zc/search", {
-      query: { q },
-      signal
-    })) as { hits?: ZcSearchHit[] };
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.searchRaw(q, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<{ hits?: any[] }>("/sigmafi/zc/search", {
+          query: { q },
+          signal
+        })) as { hits?: ZcSearchHit[] };
     return res?.hits || [];
   },
 
@@ -802,12 +904,28 @@ export const zcApi = {
   ): Promise<Record<string, ZcTokenMeta>> {
     if (!tokenIds.length) return {};
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<{ tokens?: Record<string, any> }>("/sigmafi/zc/assets", {
-      method: "POST",
-      body: { tokenIds },
-      signal
-    })) as { tokens?: Record<string, ZcTokenMeta> };
-    return res?.tokens || {};
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.lookupAssetsRaw(tokenIds, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<{ tokens?: Record<string, any> }>("/sigmafi/zc/assets", {
+          method: "POST",
+          body: { tokenIds },
+          signal
+        })) as { tokens?: Record<string, ZcTokenMeta> };
+
+    const out: Record<string, ZcTokenMeta> = {};
+    for (const [id, meta] of Object.entries(res?.tokens || {})) {
+      const low = id.toLowerCase();
+      const known = VERIFIED_META_BY_ID.get(low);
+      out[low] = {
+        ...meta,
+        id: low,
+        name: meta.name || known?.name,
+        ticker: meta.ticker || meta.name || known?.name,
+        decimals: meta.decimals ?? known?.decimals
+      };
+    }
+    return out;
   },
 
   async listAuctions(signal?: AbortSignal): Promise<{
@@ -815,9 +933,12 @@ export const zcApi = {
     vaults: ZcAuctionVaultSummary[];
   }> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
-    const res = (await zcRequest<{ lots?: any[]; vaults?: any[] }>("/sigmafi/zc/auctions", {
-      signal
-    })) as { lots?: unknown[]; vaults?: unknown[] };
+    const res = (useGraphql()
+      ? await zcGraphqlEngine.listAuctionsRaw(undefined, signal)
+      : // eslint-disable-next-line @typescript-eslint/no-explicit-any
+        await lithosRequest<{ lots?: any[]; vaults?: any[] }>("/sigmafi/zc/auctions", {
+          signal
+        })) as { lots?: unknown[]; vaults?: unknown[] };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const lots = (res?.lots || []).map((l: any): ZcAuctionLotSummary => {
@@ -852,5 +973,15 @@ export const zcApi = {
     });
 
     return { lots, vaults };
+  },
+
+  async getPortfolio(signal?: AbortSignal): Promise<Record<string, unknown>> {
+    if (useGraphql()) {
+      return zcGraphqlEngine.getPortfolioRaw(signal);
+    }
+    return (await lithosRequest<Record<string, unknown>>("/sigmafi/zc/portfolio", {
+      auth: true,
+      signal
+    })) as Record<string, unknown>;
   }
 };

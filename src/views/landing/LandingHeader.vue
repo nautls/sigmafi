@@ -3,27 +3,47 @@ import { ArrowUpRightIcon, RefreshCwIcon, SlidersIcon } from "@zhuowenli/vue-fea
 import { onBeforeUnmount, onMounted, ref } from "vue";
 import SigmaFiMark from "@/components/SigmaFiMark.vue";
 import ThemeToggle from "@/components/ThemeToggle.vue";
+import { ZcDataSource } from "@/services/zcApi";
 import { useZcStore } from "@/stories/zcStore";
 
 const zc = useZcStore();
 
 const popoverOpen = ref(false);
-const endpointInput = ref(zc.baseUrl);
+const modeInput = ref<ZcDataSource>(zc.dataSource);
+const endpointInput = ref(
+  zc.dataSource === "graphql" ? zc.graphqlUrl : zc.baseUrl
+);
 const popoverRef = ref<HTMLElement | null>(null);
 
 function togglePopover() {
-  endpointInput.value = zc.baseUrl;
+  modeInput.value = zc.dataSource;
+  endpointInput.value =
+    zc.dataSource === "graphql" ? zc.graphqlUrl : zc.baseUrl;
   popoverOpen.value = !popoverOpen.value;
 }
 
+function selectMode(mode: ZcDataSource) {
+  modeInput.value = mode;
+  endpointInput.value = mode === "graphql" ? zc.graphqlUrl : zc.baseUrl;
+}
+
 function saveEndpoint() {
-  zc.updateBaseUrl(endpointInput.value);
+  if (modeInput.value !== zc.dataSource) {
+    zc.updateDataSource(modeInput.value);
+  }
+  if (modeInput.value === "graphql") {
+    zc.updateGraphqlUrl(endpointInput.value);
+  } else {
+    zc.updateBaseUrl(endpointInput.value);
+  }
   popoverOpen.value = false;
 }
 
 function resetEndpoint() {
-  endpointInput.value = "";
-  zc.updateBaseUrl("");
+  modeInput.value = "graphql";
+  endpointInput.value = zc.defaultGraphqlUrl;
+  zc.updateDataSource("graphql");
+  zc.updateGraphqlUrl("");
   popoverOpen.value = false;
 }
 
@@ -122,7 +142,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentClick)
               <span
                 class="sf-mono text-[11px] font-semibold uppercase tracking-[0.12em] text-[color:var(--sf-muted)]"
               >
-                Lithos Data Feed
+                Chain Data Feed
               </span>
               <button
                 type="button"
@@ -134,13 +154,52 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentClick)
               </button>
             </div>
 
+            <div
+              class="mb-3 grid grid-cols-2 rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5 text-[11.5px]"
+              role="group"
+              aria-label="Data source mode"
+            >
+              <button
+                type="button"
+                :aria-pressed="modeInput === 'graphql'"
+                class="rounded-md px-2 py-1 font-medium transition-all"
+                :class="
+                  modeInput === 'graphql'
+                    ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
+                    : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
+                "
+                @click="selectMode('graphql')"
+              >
+                Ergo GraphQL
+              </button>
+              <button
+                type="button"
+                :aria-pressed="modeInput === 'lithos'"
+                class="rounded-md px-2 py-1 font-medium transition-all"
+                :class="
+                  modeInput === 'lithos'
+                    ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
+                    : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
+                "
+                @click="selectMode('lithos')"
+              >
+                Lithos Client
+              </button>
+            </div>
+
             <form class="space-y-3" @submit.prevent="saveEndpoint">
               <div>
                 <input
                   v-model="endpointInput"
-                  aria-label="Lithos data feed URL"
+                  :aria-label="
+                    modeInput === 'graphql' ? 'Ergo GraphQL endpoint URL' : 'Lithos client URL'
+                  "
                   type="text"
-                  placeholder="Default proxy (127.0.0.1:9000)"
+                  :placeholder="
+                    modeInput === 'graphql'
+                      ? zc.defaultGraphqlUrl
+                      : 'Default proxy (127.0.0.1:9000)'
+                  "
                   class="sf-mono w-full rounded-lg border border-[color:var(--sf-line-strong)] bg-[color:var(--sf-well)] px-3 py-2 text-[12px] text-[color:var(--sf-ink)] placeholder-[color:var(--sf-dim)] outline-none focus:border-[color:var(--sf-cobalt)]"
                 />
               </div>
@@ -163,7 +222,9 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentClick)
               class="mt-3 flex items-center justify-between border-t border-[color:var(--sf-line)] pt-2.5 text-[11px] text-[color:var(--sf-muted)]"
             >
               <span>{{
-                zc.connected ? `${zc.network} · ${zc.profile}` : zc.error || "Offline"
+                zc.connected
+                  ? `${zc.network} · ${zc.dataSource === 'graphql' ? 'GraphQL' : 'Lithos'} · ${zc.profile}`
+                  : zc.error || "Offline"
               }}</span>
               <span v-if="zc.connected" class="sf-mono">rev {{ zc.revision }}</span>
             </div>

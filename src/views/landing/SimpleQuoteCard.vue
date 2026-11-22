@@ -654,7 +654,7 @@ const ctaLabel = computed(() => {
 
         <p class="mt-2 text-[12.5px] leading-relaxed text-[color:var(--sf-ink-2)]">
           <template v-if="!zc.connected">
-            Connect to the Lithos feed to stream live order quotes.
+            Connecting to the Ergo chain feed to stream live order quotes.
           </template>
           <template v-else-if="amount">
             <template v-if="simLoading">Simulating against open asks…</template>
