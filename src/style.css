@@ -2,6 +2,673 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  /* Atmospheric Cool Slate Light Mode — Tonal depth without stark white flatness */
+  --sf-paper: #e8eef7;
+  --sf-paper-2: #dce4f2;
+  --sf-card: #f8faff;
+  --sf-card-elevated: #ffffff;
+  --sf-card-glass: rgba(248, 250, 255, 0.82);
+  --sf-well: #dfe7f5;
+  --sf-well-soft: rgba(223, 231, 245, 0.72);
+
+  --sf-line: rgba(15, 29, 58, 0.1);
+  --sf-line-strong: rgba(15, 29, 58, 0.18);
+  --sf-line-cobalt: rgba(36, 87, 245, 0.36);
+  --sf-line-bid: rgba(5, 135, 95, 0.34);
+  --sf-line-ask: rgba(194, 89, 10, 0.34);
+
+  --sf-ink: #0a1020;
+  --sf-ink-2: #30405a;
+  --sf-muted: #556681;
+  --sf-dim: #70829e;
+  --sf-header: rgba(232, 238, 247, 0.78);
+  --sf-action-text: #ffffff;
+  --sf-grid: rgba(15, 31, 64, 0.05);
+
+  --sf-cobalt-50: 233 241 255;
+  --sf-cobalt-100: 211 227 255;
+  --sf-cobalt-600: 36 87 245;
+  --sf-cobalt-700: 28 69 214;
+
+  --sf-cobalt: #2457f5;
+  --sf-cobalt-bright: #3b82f6;
+  --sf-cobalt-soft: rgba(36, 87, 245, 0.12);
+  --sf-cobalt-glow: rgba(36, 87, 245, 0.28);
+
+  --sf-bid: #05875f;
+  --sf-bid-soft: rgba(5, 135, 95, 0.12);
+  --sf-bid-glow: rgba(5, 135, 95, 0.24);
+
+  --sf-ask: #c2590a;
+  --sf-ask-soft: rgba(217, 119, 6, 0.13);
+  --sf-ask-glow: rgba(217, 119, 6, 0.24);
+
+  --sf-warn: #d97706;
+  --sf-danger: #dc2626;
+
+  /* Directional lighting & elevation shadows */
+  --sf-rim-top: inset 0 1px 0 rgba(255, 255, 255, 0.92);
+  --sf-shadow-card:
+    0 1px 2px rgba(10, 16, 32, 0.05),
+    0 20px 44px -22px rgba(18, 35, 74, 0.16);
+  --sf-shadow-card-hover:
+    0 8px 20px -6px rgba(10, 16, 32, 0.09),
+    0 30px 60px -22px rgba(36, 87, 245, 0.22);
+  --sf-shadow-hero:
+    0 2px 6px rgba(10, 16, 32, 0.06),
+    0 36px 80px -28px rgba(18, 35, 74, 0.22);
+  --sf-spotlight: rgba(36, 87, 245, 0.1);
+
+  /* Landing atmospheric contours & washes (Light) */
+  --sf-contour-color: #1e429f;
+  --sf-contour-line-opacity: 0.11;
+  --sf-contour-arc-opacity: 0.09;
+  --sf-wash-top: radial-gradient(
+    closest-side,
+    rgba(36, 87, 245, 0.17),
+    rgba(99, 102, 241, 0.09) 46%,
+    transparent 74%
+  );
+  --sf-wash-mid: radial-gradient(
+    closest-side,
+    rgba(14, 165, 233, 0.15),
+    rgba(5, 135, 95, 0.09) 48%,
+    transparent 75%
+  );
+  --sf-wash-low: radial-gradient(
+    closest-side,
+    rgba(99, 102, 241, 0.14),
+    rgba(36, 87, 245, 0.07) 52%,
+    transparent 76%
+  );
+
+  --sf-ease: cubic-bezier(0.22, 1, 0.36, 1);
+  --sf-font-serif: "Newsreader", Georgia, Cambria, serif;
+  --sf-font-sans: "DM Sans", system-ui, sans-serif;
+  --sf-font-mono: "IBM Plex Sans", "DM Sans", system-ui, sans-serif;
+}
+
+:root[data-theme="dark"] {
+  /* Crisp Obsidian Black & Vivid Electric Sapphire Dark Mode */
+  --sf-paper: #070a10;
+  --sf-paper-2: #0b0f18;
+  --sf-card: #121826;
+  --sf-card-elevated: #182133;
+  --sf-card-glass: rgba(18, 24, 38, 0.88);
+  --sf-well: #1a2336;
+  --sf-well-soft: rgba(26, 35, 54, 0.82);
+
+  --sf-header: rgba(11, 15, 24, 0.84);
+  --sf-action-text: #06090f;
+  --sf-ink: #f8fafc;
+  --sf-ink-2: #d6e1f2;
+  --sf-muted: #9eb0cc;
+  --sf-dim: #7b8fae;
+
+  --sf-line: rgba(205, 224, 255, 0.14);
+  --sf-line-strong: rgba(205, 224, 255, 0.26);
+  --sf-line-cobalt: rgba(96, 160, 255, 0.58);
+  --sf-line-bid: rgba(52, 235, 169, 0.44);
+  --sf-line-ask: rgba(255, 174, 82, 0.44);
+  --sf-grid: rgba(176, 208, 255, 0.08);
+
+  --sf-cobalt: #5c9bff;
+  --sf-cobalt-bright: #88b8ff;
+  --sf-cobalt-50: 20 35 64;
+  --sf-cobalt-100: 29 50 92;
+  --sf-cobalt-600: 92 155 255;
+  --sf-cobalt-700: 146 189 255;
+  --sf-cobalt-soft: rgba(92, 155, 255, 0.18);
+  --sf-cobalt-glow: rgba(92, 155, 255, 0.4);
+
+  --sf-bid: #34eba9;
+  --sf-bid-soft: rgba(52, 235, 169, 0.16);
+  --sf-bid-glow: rgba(52, 235, 169, 0.32);
+
+  --sf-ask: #ffae52;
+  --sf-ask-soft: rgba(255, 174, 82, 0.18);
+  --sf-ask-glow: rgba(255, 174, 82, 0.3);
+
+  --sf-warn: #fbbf24;
+  --sf-danger: #f87171;
+
+  --sf-rim-top: inset 0 1px 0 rgba(220, 236, 255, 0.16);
+  --sf-shadow-card:
+    0 1px 2px rgba(0, 0, 0, 0.5),
+    0 20px 48px -20px rgba(0, 0, 0, 0.85),
+    0 0 0 1px rgba(130, 178, 255, 0.06);
+  --sf-shadow-card-hover:
+    0 10px 28px -8px rgba(0, 0, 0, 0.72),
+    0 32px 68px -22px rgba(92, 155, 255, 0.32);
+  --sf-shadow-hero:
+    0 2px 6px rgba(0, 0, 0, 0.6),
+    0 36px 84px -26px rgba(0, 0, 0, 0.92),
+    0 0 54px -24px rgba(92, 155, 255, 0.24);
+  --sf-spotlight: rgba(92, 155, 255, 0.16);
+
+  /* Landing atmospheric contours & crisp edge washes (Dark) */
+  --sf-contour-color: #8abaff;
+  --sf-contour-line-opacity: 0.19;
+  --sf-contour-arc-opacity: 0.15;
+  --sf-wash-top: radial-gradient(
+    closest-side,
+    rgba(72, 138, 255, 0.2),
+    rgba(99, 102, 241, 0.06) 46%,
+    transparent 74%
+  );
+  --sf-wash-mid: radial-gradient(
+    closest-side,
+    rgba(52, 235, 169, 0.13),
+    rgba(14, 165, 233, 0.05) 48%,
+    transparent 74%
+  );
+  --sf-wash-low: radial-gradient(
+    closest-side,
+    rgba(104, 118, 255, 0.15),
+    rgba(72, 138, 255, 0.05) 50%,
+    transparent 74%
+  );
+}
+
+/* Deep midnight-sapphire architectural contrast band (works in both themes) */
+.sf-contrast-band {
+  --sf-paper: #0b1326;
+  --sf-paper-2: #080e1c;
+  --sf-card: #14213d;
+  --sf-card-elevated: #1a2b4f;
+  --sf-card-glass: rgba(20, 33, 61, 0.88);
+  --sf-well: #1b2c4e;
+  --sf-well-soft: rgba(27, 44, 78, 0.78);
+  --sf-ink: #f8fafc;
+  --sf-ink-2: #d4e0f4;
+  --sf-muted: #9db2d2;
+  --sf-dim: #7b91b6;
+  --sf-line: rgba(188, 214, 255, 0.16);
+  --sf-line-strong: rgba(188, 214, 255, 0.28);
+  --sf-line-cobalt: rgba(114, 172, 255, 0.56);
+  --sf-cobalt: #6ca6ff;
+  --sf-cobalt-soft: rgba(108, 166, 255, 0.2);
+  --sf-bid: #38eea9;
+  --sf-bid-soft: rgba(56, 238, 169, 0.18);
+  --sf-ask: #ffb55e;
+  --sf-ask-soft: rgba(255, 181, 94, 0.19);
+  --sf-rim-top: inset 0 1px 0 rgba(214, 232, 255, 0.16);
+  --sf-shadow-hero:
+    0 28px 80px -24px rgba(2, 6, 16, 0.85),
+    0 0 60px -24px rgba(92, 155, 255, 0.24);
+  background: linear-gradient(155deg, #0b1429 0%, #112142 50%, #091122 100%);
+  color: var(--sf-ink);
+}
+
+:root[data-theme="dark"] .sf-contrast-band {
+  border-top: 1px solid rgba(186, 212, 255, 0.15);
+  border-bottom: 1px solid rgba(186, 212, 255, 0.15);
+  background: linear-gradient(155deg, #0c1426 0%, #121f3a 50%, #0a1120 100%);
+}
+
+.sf-header {
+  background: var(--sf-header);
+}
+
+.sf-shell :focus-visible {
+  outline: 2px solid var(--sf-cobalt);
+  outline-offset: 3px;
+}
+
+.landing [id] {
+  scroll-margin-top: 5.5rem;
+}
+
+/* ============================================================
+   SigmaFi V2 Design System — Bold Liquid Yield Architecture
+   ============================================================ */
+.sf-shell {
+  min-height: 100vh;
+  background-color: var(--sf-paper);
+  color: var(--sf-ink);
+  font-family: var(--sf-font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  position: relative;
+  transition:
+    background-color 0.3s var(--sf-ease),
+    color 0.3s var(--sf-ease);
+}
+
+.sf-shell ::selection {
+  background: rgba(36, 87, 245, 0.22);
+  color: var(--sf-ink);
+}
+
+.sf-serif {
+  font-family: var(--sf-font-serif);
+  letter-spacing: -0.025em;
+}
+
+.sf-math {
+  font-family: var(--sf-font-serif);
+  font-style: italic;
+}
+
+.sf-mono {
+  font-family: var(--sf-font-mono);
+  font-variant-numeric: tabular-nums lining-nums;
+  font-feature-settings:
+    "tnum" 1,
+    "lnum" 1;
+}
+
+/* Selective coordinate drafting grid (only applied to specific focal graphics) */
+.sf-graph-bg {
+  background-image:
+    linear-gradient(to right, var(--sf-grid) 1px, transparent 1px),
+    linear-gradient(to bottom, var(--sf-grid) 1px, transparent 1px);
+  background-size: 36px 36px;
+}
+
+/* Primary elevated surface plate (shared across Landing & Rate Book) */
+.sf-plate {
+  background: var(--sf-card);
+  border: 1px solid var(--sf-line);
+  box-shadow: var(--sf-rim-top), var(--sf-shadow-card);
+}
+
+.sf-plate-interactive {
+  transition:
+    border-color 0.24s var(--sf-ease),
+    transform 0.28s var(--sf-ease),
+    box-shadow 0.28s var(--sf-ease);
+}
+
+.sf-plate-interactive:hover {
+  border-color: var(--sf-line-cobalt);
+  transform: translateY(-2px);
+  box-shadow: var(--sf-rim-top), var(--sf-shadow-card-hover);
+}
+
+/* Interactive Spotlight Card */
+.sf-bento {
+  position: relative;
+  background: var(--sf-card);
+  border: 1px solid var(--sf-line);
+  box-shadow: var(--sf-rim-top), var(--sf-shadow-card);
+  transition:
+    border-color 0.28s var(--sf-ease),
+    transform 0.32s var(--sf-ease),
+    box-shadow 0.32s var(--sf-ease);
+  overflow: hidden;
+}
+
+.sf-bento::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  opacity: 0;
+  transition: opacity 0.32s var(--sf-ease);
+  background: radial-gradient(
+    460px circle at var(--spot-x, 50%) var(--spot-y, 20%),
+    var(--sf-spotlight),
+    transparent 68%
+  );
+  z-index: 0;
+}
+
+.sf-bento:hover {
+  border-color: var(--sf-line-cobalt);
+  box-shadow: var(--sf-rim-top), var(--sf-shadow-card-hover);
+}
+
+.sf-bento:hover::before {
+  opacity: 1;
+}
+
+.sf-bento > * {
+  position: relative;
+  z-index: 1;
+}
+
+/* Sharp architectural inset stage inside sculpted outer frames */
+.sf-stage-sharp {
+  background: var(--sf-paper);
+  border: 1px solid var(--sf-line);
+  border-radius: 6px;
+}
+
+/* High-contrast Primary CTA Button */
+.sf-btn-primary {
+  background: var(--sf-ink);
+  color: var(--sf-action-text);
+  font-family: var(--sf-font-sans);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border: 1px solid var(--sf-ink);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.14),
+    0 10px 24px -12px rgba(10, 16, 32, 0.5);
+  transition:
+    background-color 0.2s var(--sf-ease),
+    border-color 0.2s var(--sf-ease),
+    color 0.2s var(--sf-ease),
+    transform 0.22s var(--sf-ease),
+    box-shadow 0.22s var(--sf-ease);
+}
+
+.sf-btn-primary:hover {
+  background: var(--sf-cobalt);
+  border-color: var(--sf-cobalt);
+  color: #ffffff;
+  transform: translateY(-1.5px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.25),
+    0 14px 30px -10px var(--sf-cobalt-glow);
+}
+
+.sf-btn-primary:active {
+  transform: translateY(0) scale(0.985);
+}
+
+/* Signature luminous cobalt pill CTA */
+.sf-btn-cobalt {
+  background: linear-gradient(135deg, #2b60ff 0%, #1d4ed8 100%);
+  color: #ffffff;
+  font-family: var(--sf-font-sans);
+  font-weight: 600;
+  letter-spacing: -0.01em;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.3),
+    0 14px 32px -10px var(--sf-cobalt-glow);
+  transition:
+    filter 0.2s var(--sf-ease),
+    transform 0.22s var(--sf-ease),
+    box-shadow 0.22s var(--sf-ease);
+}
+
+:root[data-theme="dark"] .sf-btn-cobalt,
+.sf-contrast-band .sf-btn-cobalt {
+  background: linear-gradient(135deg, #548dff 0%, #2e65f5 100%);
+  color: #ffffff;
+}
+
+.sf-btn-cobalt:hover {
+  filter: brightness(1.07);
+  transform: translateY(-1.5px);
+  box-shadow:
+    inset 0 1px 0 rgba(255, 255, 255, 0.36),
+    0 20px 38px -10px var(--sf-cobalt-glow);
+}
+
+.sf-btn-cobalt:active {
+  transform: translateY(0) scale(0.985);
+}
+
+.sf-btn-outline {
+  background: var(--sf-card-glass);
+  color: var(--sf-ink);
+  font-family: var(--sf-font-sans);
+  font-weight: 500;
+  border: 1px solid var(--sf-line-strong);
+  box-shadow: var(--sf-rim-top);
+  transition:
+    background-color 0.18s ease,
+    border-color 0.18s ease,
+    transform 0.2s var(--sf-ease),
+    box-shadow 0.2s var(--sf-ease);
+}
+
+.sf-btn-outline:hover {
+  background: var(--sf-card);
+  border-color: var(--sf-line-cobalt);
+  transform: translateY(-1px);
+}
+
+.sf-btn-outline:active {
+  transform: translateY(0) scale(0.985);
+}
+
+/* Custom precision sliders & subtle scrollbars */
+.sf-range {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 100%;
+  height: 4px;
+  border-radius: 9999px;
+  background: var(--sf-line-strong);
+  outline: none;
+  cursor: pointer;
+}
+
+.sf-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  appearance: none;
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: var(--sf-cobalt);
+  border: 2px solid var(--sf-card);
+  box-shadow: 0 1px 4px rgba(10, 15, 28, 0.35);
+  transition: transform 0.15s var(--sf-ease);
+}
+
+.sf-range::-webkit-slider-thumb:hover {
+  transform: scale(1.14);
+}
+
+.sf-range::-moz-range-thumb {
+  width: 15px;
+  height: 15px;
+  border-radius: 9999px;
+  background: var(--sf-cobalt);
+  border: 2px solid var(--sf-card);
+  box-shadow: 0 1px 4px rgba(10, 15, 28, 0.35);
+  transition: transform 0.15s var(--sf-ease);
+}
+
+.sf-scroll::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+.sf-scroll::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+.sf-scroll::-webkit-scrollbar-thumb {
+  background: var(--sf-line-strong);
+  border-radius: 9999px;
+}
+
+.sf-scroll::-webkit-scrollbar-thumb:hover {
+  background: var(--sf-muted);
+}
+
+/* ============================================================
+   Animations & Scroll Reveals
+   ============================================================ */
+@keyframes sfPulse {
+  0% {
+    transform: scale(1);
+    opacity: 0.72;
+  }
+  58%,
+  100% {
+    transform: scale(3.2);
+    opacity: 0;
+  }
+}
+
+@keyframes sfDashOrbit {
+  from {
+    stroke-dashoffset: 0;
+  }
+  to {
+    stroke-dashoffset: -120;
+  }
+}
+
+@keyframes sfDrawLine {
+  from {
+    stroke-dashoffset: 1000;
+  }
+  to {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes sfRiseIn {
+  from {
+    opacity: 0;
+    transform: translateY(18px);
+  }
+  to {
+    opacity: 1;
+    transform: translateY(0);
+  }
+}
+
+@keyframes sfSignal {
+  0% {
+    stroke-dashoffset: 48;
+  }
+  100% {
+    stroke-dashoffset: 0;
+  }
+}
+
+@keyframes sfFloatSlow {
+  0%,
+  100% {
+    transform: translate3d(0, 0, 0);
+  }
+  50% {
+    transform: translate3d(0, -10px, 0);
+  }
+}
+
+/* Used in /app Rate Book header status indicator */
+.sf-live-dot {
+  position: relative;
+  display: inline-block;
+  width: 6px;
+  height: 6px;
+  border-radius: 9999px;
+  background: var(--sf-bid);
+  box-shadow: 0 0 8px var(--sf-bid-glow);
+}
+
+.sf-live-dot::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: 9999px;
+  border: 1px solid var(--sf-bid);
+  animation: sfPulse 2.6s var(--sf-ease) infinite;
+}
+
+.sf-live-dot.is-warn {
+  background: var(--sf-warn);
+  box-shadow: 0 0 8px rgba(217, 119, 6, 0.45);
+}
+
+.sf-live-dot.is-warn::after {
+  border-color: var(--sf-warn);
+}
+
+.sf-live-dot.is-idle {
+  background: var(--sf-dim);
+  box-shadow: none;
+}
+
+.sf-live-dot.is-idle::after {
+  animation: none;
+  opacity: 0;
+}
+
+.sf-draw {
+  stroke-dasharray: 1000;
+  stroke-dashoffset: 0;
+  animation: sfDrawLine 1.15s var(--sf-ease) both;
+}
+
+@media screen and (prefers-reduced-motion: no-preference) {
+  [data-draw="waiting"] .sf-plot-traces {
+    visibility: hidden;
+  }
+  [data-draw="entered"] .sf-plot-traces {
+    animation: sfRevealPlot 1.15s cubic-bezier(0.3, 0.65, 0.35, 1) backwards;
+  }
+  @keyframes sfRevealPlot {
+    from {
+      clip-path: inset(-8px 100% -8px 0);
+    }
+    to {
+      clip-path: inset(-8px -8px -8px 0);
+    }
+  }
+
+  [data-reveal="hidden"] {
+    opacity: 0;
+    transform: translateY(24px);
+  }
+  [data-reveal="shown"] {
+    opacity: 1;
+    transform: translateY(0);
+    transition:
+      opacity 0.72s var(--sf-ease) var(--sf-reveal-delay, 0ms),
+      transform 0.72s var(--sf-ease) var(--sf-reveal-delay, 0ms);
+  }
+}
+
+.sf-dash-flow {
+  animation: sfDashOrbit 14s linear infinite;
+}
+
+.sf-signal-flow {
+  stroke-dasharray: 6 6;
+  animation: sfSignal 1.4s linear infinite;
+}
+
+.sf-float-slow {
+  animation: sfFloatSlow 8s ease-in-out infinite;
+}
+
+.sf-rise {
+  animation: sfRiseIn 0.72s var(--sf-ease) both;
+}
+
+.sf-rise-d1 {
+  animation-delay: 85ms;
+}
+
+.sf-rise-d2 {
+  animation-delay: 170ms;
+}
+
+.sf-rise-d3 {
+  animation-delay: 255ms;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .sf-shell *,
+  .sf-shell *::before,
+  .sf-shell *::after {
+    transition-duration: 0s !important;
+  }
+  .sf-live-dot::after,
+  .sf-draw,
+  .sf-dash-flow,
+  .sf-signal-flow,
+  .sf-float-slow,
+  .sf-rise {
+    animation: none !important;
+  }
+}
+
+/* ============================================================
+   Legacy SigmaFi V1 Utilities (Preserved)
+   ============================================================ */
 .stat {
   @apply gap-0.5;
 }

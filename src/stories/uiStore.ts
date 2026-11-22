@@ -30,6 +30,11 @@ export const useUIStore = defineStore("ui", () => {
     }
 
     setTheme(currentTheme.value);
+    try {
+      localStorage.setItem("sigmafi.theme", currentTheme.value);
+    } catch {
+      // Keep the theme for this session when storage is restricted.
+    }
   }
 
   return { theme, isDark, isKYAAccepted, toggleTheme, setAcceptedKYA };
