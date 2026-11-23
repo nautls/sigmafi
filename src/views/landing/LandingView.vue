@@ -124,20 +124,20 @@ function openKya() {
         <!-- ==========================================================
              HERO SECTION — Clean Morpho Opening + P2P Yield Plane
              ========================================================== -->
-        <section class="mx-auto max-w-[1280px] px-5 pt-12 pb-16 sm:px-8 sm:pt-16 lg:pt-20 lg:pb-24">
-          <div class="grid grid-cols-1 items-center gap-12 lg:grid-cols-[0.9fr_1.1fr] lg:gap-14">
+        <section class="mx-auto max-w-[1280px] px-5 pt-10 pb-14 sm:px-8 sm:pt-12 lg:pt-16 lg:pb-20">
+          <div class="grid grid-cols-1 items-center gap-10 lg:grid-cols-[1.02fr_0.98fr] lg:gap-12">
             <div>
               <h1 class="sf-serif sf-rise hero-headline text-[color:var(--sf-ink)]">
-                A P2P market for<br />
-                <em class="hero-shimmer">liquid yield.</em>
+                <span class="block sm:whitespace-nowrap">A P2P market for</span>
+                <em class="hero-shimmer block sm:whitespace-nowrap">liquid yield.</em>
               </h1>
 
-              <p class="sf-rise sf-rise-d1 hero-subcopy mt-6 text-[color:var(--sf-ink-2)]">
+              <p class="sf-rise sf-rise-d1 hero-subcopy mt-5 text-[color:var(--sf-ink-2)]">
                 Lend along rolling yield curves, borrow fixed-term against collateral baskets, and
                 trade zero-coupon bonds or shares in one unified order book.
               </p>
 
-              <div class="sf-rise sf-rise-d2 mt-9 flex flex-wrap items-center gap-3.5">
+              <div class="sf-rise sf-rise-d2 mt-7 flex flex-wrap items-center gap-3.5">
                 <router-link
                   to="/app"
                   class="sf-btn-cobalt inline-flex h-12 items-center gap-2 rounded-full px-7 text-[15px]"
@@ -246,7 +246,7 @@ function openKya() {
                   to="/app"
                   class="sf-btn-outline inline-flex h-11 items-center rounded-full px-5 text-[14px]"
                 >
-                  <span>Open Rate Book</span>
+                  <span>Open Yield Curve</span>
                 </router-link>
               </div>
             </div>
@@ -264,7 +264,7 @@ function openKya() {
             <div v-reveal>
               <h2 class="sf-serif chapter-title text-[color:var(--sf-ink)]">
                 Priced in <span class="title-gradient-luminous">yield itself,</span><br />
-                not static prices.
+                not currency.
               </h2>
               <p class="chapter-copy mt-5 text-[color:var(--sf-ink-2)]">
                 Zero-coupon bonds change value with every passing block. By quoting the entire
@@ -277,7 +277,7 @@ function openKya() {
                   to="/app"
                   class="sf-btn-cobalt inline-flex h-11 items-center gap-2 rounded-full px-6 text-[14px]"
                 >
-                  <span>Explore Rate Book</span>
+                  <span>Explore Yield Curve</span>
                   <arrow-right-icon class="h-4 w-4" />
                 </router-link>
               </div>
@@ -585,7 +585,15 @@ function openKya() {
             <ul class="mt-3 space-y-2">
               <li>
                 <router-link to="/app" class="transition-colors hover:text-[color:var(--sf-ink)]">
-                  Rate Book
+                  Yield Curve
+                </router-link>
+              </li>
+              <li>
+                <router-link
+                  to="/app/studio"
+                  class="transition-colors hover:text-[color:var(--sf-ink)]"
+                >
+                  Studio
                 </router-link>
               </li>
               <li>
@@ -688,10 +696,10 @@ function openKya() {
 
 <style scoped>
 .hero-headline {
-  font-size: clamp(3.25rem, 6.4vw, 5.15rem);
+  font-size: clamp(2.4rem, 3.85vw, 3.7rem);
   font-weight: 500;
-  line-height: 0.96;
-  letter-spacing: -0.048em;
+  line-height: 1.04;
+  letter-spacing: -0.04em;
 }
 
 .hero-shimmer {

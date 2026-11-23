@@ -6,9 +6,11 @@ const props = withDefaults(
   defineProps<{
     market: ZcMarket;
     size?: number;
+    bare?: boolean;
   }>(),
   {
-    size: 20
+    size: 20,
+    bare: false
   }
 );
 
@@ -23,7 +25,8 @@ const src = computed(() =>
     :alt="market"
     :width="size"
     :height="size"
-    class="rounded-full object-cover ring-1 ring-slate-900/10 shrink-0"
+    class="shrink-0"
+    :class="bare ? 'object-contain' : 'rounded-full object-cover ring-1 ring-slate-900/10'"
     :style="{ width: `${size}px`, height: `${size}px` }"
   />
 </template>

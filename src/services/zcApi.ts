@@ -1,12 +1,19 @@
 import { Network } from "@fleet-sdk/common";
 import { ZcApiError } from "./zc/errors";
 import {
+  DEFAULT_MAINNET_EXPLORER_URL,
+  DEFAULT_TESTNET_EXPLORER_URL,
+  OFFICIAL_MAINNET_EXPLORER_URL
+} from "./zc/explorerClient";
+import {
   DEFAULT_MAINNET_GRAPHQL_URL,
-  DEFAULT_TESTNET_GRAPHQL_URL
+  DEFAULT_TESTNET_GRAPHQL_URL,
+  SIGMASPACE_GRAPHQL_URL
 } from "./zc/graphqlClient";
 import { ZcGraphqlEngine, ZcWalletProvider } from "./zc/reads";
 import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
+  ZcActionAvailability,
   ZcAskSummary,
   ZcAuctionLotSummary,
   ZcAuctionVaultSummary,
@@ -17,14 +24,18 @@ import {
   ZcFillsResponse,
   ZcFillSummary,
   ZcInfoResponse,
+  ZcLookupResult,
   ZcMarket,
   ZcMatchesResponse,
   ZcOfferSummary,
   ZcOrderbook,
   ZcPagedResult,
+  ZcPortfolioPosition,
+  ZcPortfolioWrap,
   ZcRawCurvesResponse,
   ZcSearchHit,
-  ZcSimulateResponse
+  ZcSimulateResponse,
+  ZcWalletToken
 } from "@/types/zc";
 import { getNetworkType } from "@/utils/otherUtils";
 import {
@@ -32,18 +43,29 @@ import {
   fromErg,
   fromMarket,
   fromRaw,
+  isHex64,
   LIT_TOKEN_ID,
   reasonText,
   SIGUSD_TOKEN_ID,
-  toMarket
+  toMarket,
+  toRaw
 } from "@/utils/zcMath";
 
-export { ZcApiError, DEFAULT_MAINNET_GRAPHQL_URL, DEFAULT_TESTNET_GRAPHQL_URL };
+export {
+  ZcApiError,
+  DEFAULT_MAINNET_EXPLORER_URL,
+  OFFICIAL_MAINNET_EXPLORER_URL,
+  DEFAULT_TESTNET_EXPLORER_URL,
+  DEFAULT_MAINNET_GRAPHQL_URL,
+  SIGMASPACE_GRAPHQL_URL,
+  DEFAULT_TESTNET_GRAPHQL_URL
+};
 export type { ZcWalletProvider };
 
-export type ZcDataSource = "graphql" | "lithos";
+export type ZcDataSource = "explorer" | "graphql" | "lithos";
 
 const DATA_SOURCE_KEY = "sigmafi.zc.dataSource";
+const EXPLORER_URL_KEY = "sigmafi.zc.explorerUrl";
 const GRAPHQL_URL_KEY = "sigmafi.zc.graphqlUrl";
 const BASE_URL_KEY = "sigmafi.zc.baseUrl";
 const API_KEY_STORAGE = "sigmafi.zc.apiKey";
@@ -61,6 +83,14 @@ export interface ZcTokenMeta {
   kind?: string;
 }
 
+export function getDefaultZcExplorerUrl(): string {
+  const envUrl = import.meta.env.VITE_ERGO_EXPLORER_URL;
+  if (typeof envUrl === "string" && envUrl.trim()) return envUrl.trim();
+  return getNetworkType() === Network.Mainnet
+    ? DEFAULT_MAINNET_EXPLORER_URL
+    : DEFAULT_TESTNET_EXPLORER_URL;
+}
+
 export function getDefaultZcGraphqlUrl(): string {
   const envUrl = import.meta.env.VITE_ERGO_GRAPHQL_URL;
   if (typeof envUrl === "string" && envUrl.trim()) return envUrl.trim();
@@ -72,11 +102,11 @@ export function getDefaultZcGraphqlUrl(): string {
 export function getZcDataSource(): ZcDataSource {
   try {
     const stored = localStorage.getItem(DATA_SOURCE_KEY);
-    if (stored === "lithos" || stored === "graphql") return stored;
+    if (stored === "explorer" || stored === "graphql" || stored === "lithos") return stored;
   } catch {
     // storage unavailable
   }
-  return "graphql";
+  return "explorer";
 }
 
 export function setZcDataSource(source: ZcDataSource): void {
@@ -84,6 +114,34 @@ export function setZcDataSource(source: ZcDataSource): void {
     localStorage.setItem(DATA_SOURCE_KEY, source);
   } catch {
     // storage unavailable
+  }
+  if (source === "explorer") {
+    zcGraphqlEngine.setTransport("explorer", getZcExplorerUrl());
+  } else if (source === "graphql") {
+    zcGraphqlEngine.setTransport("graphql", getZcGraphqlUrl());
+  }
+}
+
+export function getZcExplorerUrl(): string {
+  try {
+    const stored = localStorage.getItem(EXPLORER_URL_KEY);
+    if (stored !== null && stored.trim()) return stored.trim();
+  } catch {
+    // storage unavailable
+  }
+  return getDefaultZcExplorerUrl();
+}
+
+export function setZcExplorerUrl(url: string): void {
+  const clean = url.trim();
+  try {
+    if (clean) localStorage.setItem(EXPLORER_URL_KEY, clean);
+    else localStorage.removeItem(EXPLORER_URL_KEY);
+  } catch {
+    // storage unavailable
+  }
+  if (getZcDataSource() === "explorer") {
+    zcGraphqlEngine.setTransport("explorer", clean || getDefaultZcExplorerUrl());
   }
 }
 
@@ -105,7 +163,9 @@ export function setZcGraphqlUrl(url: string): void {
   } catch {
     // storage unavailable
   }
-  zcGraphqlEngine.setEndpoint(clean || getDefaultZcGraphqlUrl());
+  if (getZcDataSource() === "graphql") {
+    zcGraphqlEngine.setTransport("graphql", clean || getDefaultZcGraphqlUrl());
+  }
 }
 
 export function getZcBaseUrl(): string {
@@ -146,7 +206,11 @@ export function setZcApiKey(key: string): void {
   }
 }
 
-export const zcGraphqlEngine = new ZcGraphqlEngine(getZcGraphqlUrl());
+const initialSource = getZcDataSource();
+export const zcGraphqlEngine = new ZcGraphqlEngine(
+  initialSource === "graphql" ? getZcGraphqlUrl() : getZcExplorerUrl(),
+  initialSource === "graphql" ? "graphql" : "explorer"
+);
 
 export function setZcWalletProvider(provider: ZcWalletProvider): void {
   zcGraphqlEngine.setWalletProvider(provider);
@@ -157,7 +221,7 @@ export function resetZcEngine(): void {
 }
 
 function useGraphql(): boolean {
-  return getZcDataSource() === "graphql";
+  return getZcDataSource() !== "lithos";
 }
 
 function buildQuery(params?: Record<string, string | number | boolean | undefined | null>): string {
@@ -269,22 +333,71 @@ function adaptCollateral(col: any, tokenMap: Record<string, ZcTokenMeta> = {}): 
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function adaptBond(raw: any, tokenMap: Record<string, ZcTokenMeta> = {}): ZcBondSummary | null {
+export function adaptBond(raw: any, tokenMap: Record<string, ZcTokenMeta> = {}): ZcBondSummary | null {
   if (!raw) return null;
-  const market: ZcMarket = raw.market === "ERG" ? "ERG" : "SigUSD";
+  const inferredMarket: ZcMarket =
+    raw.market === "ERG"
+      ? "ERG"
+      : raw.market === "SigUSD"
+        ? "SigUSD"
+        : (() => {
+            const s = raw.settlement;
+            if (!s) return "SigUSD";
+            // eslint-disable-next-line @typescript-eslint/no-explicit-any
+            if ((s.tokens || []).some((t: any) => String(t.tokenId || "").toLowerCase() === SIGUSD_TOKEN_ID)) {
+              return "SigUSD";
+            }
+            if (s.nanoErg && BigInt(s.nanoErg) > 10_000_000n) return "ERG";
+            return "SigUSD";
+          })();
+
+  const settlement: Record<string, number> | null = raw.settlement
+    ? (() => {
+        const out: Record<string, number> = {};
+        const ergVal = fromErg(raw.settlement.nanoErg);
+        if (ergVal && ergVal > 0) out.ERG = ergVal;
+        for (const t of raw.settlement.tokens || []) {
+          const id = String(t.tokenId || "").toLowerCase();
+          if (id === SIGUSD_TOKEN_ID) {
+            out.SigUSD = (out.SigUSD || 0) + (fromRaw(t.amount, 2) || 0);
+          } else {
+            const meta = tokenMap[id];
+            const known = VERIFIED_META_BY_ID.get(id);
+            const dec = meta?.decimals ?? known?.decimals ?? 0;
+            const label = meta?.ticker || meta?.name || known?.name || `${id.slice(0, 6)}…`;
+            out[label] = (out[label] || 0) + (fromRaw(t.amount, dec) || 0);
+          }
+        }
+        return out;
+      })()
+    : null;
+
   return {
     id: raw.assetId || raw.id || "",
-    market,
-    principal: raw.principal != null ? fromMarket(raw.principal, market) : null,
-    repayment: fromMarket(raw.repayment, market) ?? 0,
+    stateBoxId: raw.stateBoxId ?? null,
+    created: raw.stateCreated ?? raw.start ?? 0,
+    state: raw.state || "live",
+    market: inferredMarket,
+    borrowerHash: raw.borrowerHash ?? null,
+    principal: raw.principal != null ? fromMarket(raw.principal, inferredMarket) : null,
+    repayment: fromMarket(raw.repayment, inferredMarket) ?? 0,
     start: raw.start ?? 0,
     maturity: raw.maturity ?? 0,
+    timing: raw.timing || "fixed",
+    reserve: raw.reserveNanoErg != null ? fromErg(raw.reserveNanoErg) ?? 0.05 : 0.05,
     collateral: adaptCollateral(raw.collateral, tokenMap),
     rule: raw.rule?.kind || "maturity",
     ratio: raw.rule?.ratioBps != null ? raw.rule.ratioBps / 100 : null,
     oracleAge: raw.rule?.oracleAge ?? 60,
     cov: raw.coverBps != null ? raw.coverBps / 100 : null,
-    vault: null
+    recollateralizeFrom: raw.recollateralizeFrom ?? null,
+    refreshFrom: raw.refreshFrom ?? null,
+    settlement,
+    vault: null,
+    pending: !!raw.pending,
+    mine: !!raw.mine,
+    borrowedByMe: !!(raw.borrowedByMe ?? raw.mine),
+    checks: Array.isArray(raw.checks) ? raw.checks : []
   };
 }
 
@@ -321,10 +434,19 @@ export function adaptCurves(raw: ZcRawCurvesResponse, market: ZcMarket): ZcCurve
     })),
     dots: (raw.askDots || []).map((p) => ({
       id: p.askId,
+      kind:
+        p.kind === "new"
+          ? ("order" as const)
+          : p.kind === "shares"
+            ? ("shares" as const)
+            : p.kind
+              ? ("unit" as const)
+              : undefined,
       d: p.blocks,
       y: p.bps,
       ok: p.ok !== false,
-      pending: !!p.pending
+      pending: !!p.pending,
+      borrowedByMe: !!p.borrowedByMe
     })),
     windows: (raw.windows || []).map((w) => ({
       id: w.askId,
@@ -427,6 +549,7 @@ export function adaptAskSummary(raw: any, tokenMap: Record<string, ZcTokenMeta> 
       ok: status === "ok",
       pending: !!raw.pending,
       owner: !!raw.mine,
+      borrowedByMe: !!raw.borrowedByMe,
       quote: q,
       rule: raw.rule?.kind || "maturity",
       ratio: raw.rule?.ratioBps != null ? raw.rule.ratioBps / 100 : null,
@@ -486,6 +609,7 @@ export function adaptAskSummary(raw: any, tokenMap: Record<string, ZcTokenMeta> 
     ok: status === "ok",
     pending: !!raw.pending,
     owner: !!raw.mine,
+    borrowedByMe: !!raw.borrowedByMe || !!raw.bond?.borrowedByMe,
     quote: q,
     rule: bond?.rule || raw.rule?.kind || "maturity",
     ratio: bond?.ratio ?? (raw.rule?.ratioBps != null ? raw.rule.ratioBps / 100 : null),
@@ -564,7 +688,10 @@ export function adaptOrderbook(raw: any, market: ZcMarket, band: number | null, 
       d: r.blocks,
       window: !!r.window,
       ok: r.ok !== false,
-      reason: reasonText(r.reason, r.ok === false ? "paused" : "ok")
+      borrowedByMe: !!r.borrowedByMe,
+      reason: reasonText(r.reason, r.ok === false ? "paused" : "ok"),
+      bidAtD: r.bidAtBps ?? null,
+      vsBid: r.spreadBps ?? null
     }))
     .sort((a: { y: number }, b: { y: number }) => (a.y ?? 0) - (b.y ?? 0));
 
@@ -574,6 +701,8 @@ export function adaptOrderbook(raw: any, market: ZcMarket, band: number | null, 
     .map((r: any) => ({
       id: r.boxId,
       y: r.bps,
+      yMin: r.minBps ?? r.bps,
+      yMax: r.maxBps ?? r.bps,
       size: fromMarket(r.size, market) ?? 0,
       range: (r.range || [raw?.range?.from ?? DAY_BLOCKS, raw?.range?.to ?? 262_800]) as [
         number,
@@ -589,7 +718,12 @@ export function adaptOrderbook(raw: any, market: ZcMarket, band: number | null, 
     bids,
     bestAsk: raw?.bestAskBps ?? null,
     bestBid: raw?.bestBidBps ?? null,
+    anchorBlocks: raw?.anchorBlocks ?? null,
+    anchorBid: raw?.anchorBidBps ?? null,
     spread: raw?.spreadBps ?? null,
+    spreadD: raw?.spreadBlocks ?? null,
+    spreadBid: raw?.spreadBidBps ?? null,
+    spreadAsk: raw?.spreadAskBps ?? null,
     lo: raw?.range?.from ?? DAY_BLOCKS,
     hi: raw?.range?.to ?? 262_800,
     band,
@@ -620,6 +754,13 @@ export function adaptFillSummary(raw: any): ZcFillSummary {
   };
 }
 
+export function toErgRaw(
+  value: number | string | null | undefined,
+  round: "floor" | "ceil" | "round" = "floor"
+): string | null {
+  return toRaw(value, 9, round);
+}
+
 export function buildWalletLendDraft(params: {
   market: ZcMarket;
   amount: number;
@@ -640,6 +781,493 @@ export function buildWalletLendDraft(params: {
     amount: raw,
     to: Math.round(params.to),
     coverage: Math.round(params.coverage * 100)
+  };
+}
+
+export function buildOrderBody(params: {
+  market: ZcMarket;
+  pricing: "fixed" | "yield" | "window";
+  principal: number | null;
+  repayment: number | null;
+  mode: "fixed" | "term" | "window";
+  maturity?: number | null;
+  exact?: boolean;
+  duration?: number | null;
+  window?: { min: number; max: number } | null;
+  tp?: { h0: number; y0: number; h1: number; y1: number } | null;
+  points?: { d: number; y: number }[] | null;
+  cap?: number | null;
+  collateral: { erg: number; usd: number; tokens: { id: string; amount: number; decimals?: number }[] };
+  rule: "oracle" | "maturity";
+  ratio: number;
+  oracleAge?: number;
+  guard?: number | null;
+  expiry?: number | null;
+  expiryFee?: number | null;
+}): Record<string, unknown> | null {
+  const principalRaw = toMarket(params.principal, params.market, "floor");
+  const repaymentRaw = toMarket(params.repayment, params.market, "ceil");
+  if (!principalRaw || !repaymentRaw || BigInt(principalRaw) <= 0n || BigInt(repaymentRaw) <= 0n) {
+    return null;
+  }
+
+  let timing: Record<string, unknown>;
+  if (params.pricing === "window" || params.mode === "window") {
+    if (!params.window?.min || !params.window?.max) return null;
+    timing = {
+      mode: "window",
+      minDuration: Math.round(params.window.min),
+      maxDuration: Math.round(params.window.max)
+    };
+  } else if (params.mode === "term") {
+    if (!params.duration) return null;
+    timing = { mode: "term", duration: Math.round(params.duration) };
+  } else {
+    if (!params.maturity) return null;
+    timing = { mode: "fixed", maturity: Math.round(params.maturity), exact: !!params.exact };
+  }
+
+  const ergCol = Math.max(0.001, params.collateral?.erg || 0);
+  const colTokens: { tokenId: string; amount: string }[] = [];
+  if (params.collateral?.usd > 0) {
+    const rawUsd = toRaw(params.collateral.usd, 2, "floor");
+    if (rawUsd && BigInt(rawUsd) > 0n) {
+      colTokens.push({ tokenId: SIGUSD_TOKEN_ID, amount: rawUsd });
+    }
+  }
+  for (const t of params.collateral?.tokens || []) {
+    if (t.amount > 0 && isHex64(t.id)) {
+      const amtRaw = toRaw(t.amount, t.decimals ?? 0, "floor");
+      if (amtRaw && BigInt(amtRaw) > 0n) {
+        colTokens.push({ tokenId: t.id.toLowerCase(), amount: amtRaw });
+      }
+    }
+  }
+
+  const body: Record<string, unknown> = {
+    market: params.market,
+    pricing: params.pricing,
+    principal: principalRaw,
+    repayment: repaymentRaw,
+    timing,
+    collateral: {
+      nanoErg: toErgRaw(ergCol, "ceil") || "1000000",
+      tokens: colTokens
+    },
+    rule:
+      params.rule === "oracle"
+        ? {
+            kind: "oracle",
+            ratioBps: Math.round((params.ratio || 150) * 100),
+            oracleAge: Math.round(params.oracleAge || 60)
+          }
+        : { kind: "maturity" }
+  };
+
+  if (params.rule === "oracle") {
+    body.fillGuard = params.guard != null ? { ratioBps: Math.round(params.guard * 100) } : null;
+  }
+  if (params.pricing === "yield" && params.tp) {
+    body.yield = {
+      startBps: Math.max(0, Math.round(params.tp.y0)),
+      endBps: Math.max(0, Math.round(params.tp.y1)),
+      endHeight: Math.round(params.tp.h1)
+    };
+  }
+  if (params.pricing === "window") {
+    body.curve = {
+      capBps: Math.max(0, Math.round(params.cap || 0)),
+      points: (params.points || []).map((p) => ({
+        blocks: Math.round(p.d),
+        bps: Math.max(0, Math.round(p.y))
+      }))
+    };
+  }
+  if (params.expiry != null) body.expiry = Math.round(params.expiry);
+  if (params.expiryFee != null) body.expiryFeeNanoErg = toErgRaw(params.expiryFee, "ceil");
+  return body;
+}
+
+export function buildOfferBody(params: {
+  market: ZcMarket;
+  capital: number | null;
+  minYield: number;
+  points: { d: number; y: number }[];
+  minBlocks: number;
+  maxBlocks: number;
+  floor: number;
+  oracleAge?: number;
+  expiry?: number | null;
+  reserve?: number | null;
+  fee?: number | null;
+  tokenBudget?: {
+    refundFee?: number;
+    ergFunding?: number;
+    minFillBps?: number;
+    rewardBudget?: number;
+  };
+  shares?: { floor: number; expiry: number } | null;
+  delivery?: "unit" | "selective" | "dutch";
+  deliveryAuction?: {
+    opening?: number;
+    floor?: number;
+    length?: number;
+    expiry?: number;
+    mintFee?: number;
+    pullFee?: number;
+  };
+}): Record<string, unknown> | null {
+  const capRaw = toMarket(params.capital, params.market, "floor");
+  if (!capRaw || BigInt(capRaw) <= 0n) return null;
+
+  const body: Record<string, unknown> = {
+    market: params.market,
+    capital: capRaw,
+    minYieldBps: Math.max(0, Math.round(params.minYield || 0)),
+    curve: (params.points || []).map((p) => ({
+      blocks: Math.round(p.d),
+      bps: Math.max(0, Math.round(p.y))
+    })),
+    minBlocks: Math.max(1, Math.round(params.minBlocks || 1)),
+    maxBlocks: Math.max(1, Math.round(params.maxBlocks || 262_800)),
+    floorBps: Math.round((params.floor || 150) * 100),
+    oracleAge: Math.round(params.oracleAge || 30),
+    expiry: params.expiry != null ? Math.round(params.expiry) : undefined,
+    reserveNanoErg: params.reserve != null ? toErgRaw(params.reserve, "ceil") : undefined,
+    shareBounds: params.shares
+      ? { floorBps: Math.round(params.shares.floor), maxExpiry: Math.round(params.shares.expiry) }
+      : null
+  };
+
+  if (params.market === "ERG") {
+    body.erg = { batcherFeeNanoErg: toErgRaw(params.fee ?? 0.005, "ceil") };
+  } else {
+    const t = params.tokenBudget || {};
+    body.token = {
+      refundFeeNanoErg: toErgRaw(t.refundFee ?? params.fee ?? 0.005, "ceil"),
+      ergFundingNanoErg: toErgRaw(t.ergFunding ?? 0.5, "ceil"),
+      minFillBps: Math.round(t.minFillBps ?? 100),
+      ...(t.rewardBudget != null ? { rewardBudgetNanoErg: toErgRaw(t.rewardBudget, "ceil") } : {})
+    };
+  }
+
+  if (params.delivery === "selective" || params.delivery === "dutch") {
+    const a = params.deliveryAuction || {};
+    body.delivery = {
+      kind: params.delivery,
+      openingBps: Math.round((a.opening ?? 200) * 100),
+      floorBps: Math.round((a.floor ?? 90) * 100),
+      length: Math.round(a.length ?? 720),
+      expiry: Math.round(a.expiry ?? 2160),
+      mintFeeNanoErg: toErgRaw(a.mintFee ?? 0.005, "ceil"),
+      pullFeeNanoErg: toErgRaw(a.pullFee ?? 0.005, "ceil")
+    };
+  } else {
+    body.delivery = { kind: "unit" };
+  }
+  return body;
+}
+
+export function buildAskBody(params: {
+  tokenId: string;
+  market: ZcMarket;
+  units: number;
+  pricing: "fixed" | "yield";
+  price?: number | null;
+  floor?: number | null;
+  tp?: { h0: number; y0: number; h1: number; y1: number } | null;
+  guard?: { ratio: number; age?: number } | null;
+  minFill?: number;
+  expiry?: number;
+}): Record<string, unknown> | null {
+  if (!isHex64(params.tokenId) || !params.units || params.units < 1) return null;
+  const pricingObj =
+    params.pricing === "fixed"
+      ? { kind: "fixed", price: toMarket(params.price, params.market, "ceil") }
+      : {
+          kind: "yield",
+          startBps: Math.max(0, Math.round(params.tp?.y0 ?? 0)),
+          endBps: Math.max(0, Math.round(params.tp?.y1 ?? params.tp?.y0 ?? 0)),
+          endHeight: Math.round(params.tp?.h1 ?? params.expiry ?? 0),
+          floor: params.floor && params.floor > 0 ? toMarket(params.floor, params.market, "ceil") : "0"
+        };
+  if (
+    params.pricing === "fixed" &&
+    (!("price" in pricingObj) || !pricingObj.price || BigInt(pricingObj.price) <= 0n)
+  ) {
+    return null;
+  }
+  return {
+    tokenId: params.tokenId.toLowerCase(),
+    units: String(Math.round(params.units)),
+    pricing: pricingObj,
+    saleGuard: params.guard
+      ? {
+          ratioBps: Math.round(params.guard.ratio * 100),
+          oracleAge: Math.round(params.guard.age ?? 30)
+        }
+      : null,
+    minFill: params.minFill != null ? String(Math.max(1, Math.round(params.minFill))) : undefined,
+    expiry: params.expiry != null ? Math.round(params.expiry) : undefined
+  };
+}
+
+export function buildLotBody(params: {
+  market: ZcMarket;
+  items: { id: string; amount: number; decimals?: number }[];
+  erg?: number | null;
+  opening: number | null;
+  floor: number | null;
+  start?: number;
+  end: number;
+  expiry?: number;
+  refundFee?: number;
+}): Record<string, unknown> | null {
+  const openingRaw = toMarket(params.opening, params.market, "ceil");
+  const floorRaw = toMarket(params.floor, params.market, "ceil");
+  if (!openingRaw || !floorRaw) return null;
+  const tokItems = (params.items || [])
+    .filter((t) => t.amount > 0 && isHex64(t.id))
+    .map((t) => ({
+      tokenId: t.id.toLowerCase(),
+      amount: toRaw(t.amount, t.decimals ?? 0, "floor")
+    }))
+    .filter((t): t is { tokenId: string; amount: string } => !!t.amount && BigInt(t.amount) > 0n);
+
+  return {
+    market: params.market,
+    items: tokItems,
+    nanoErg:
+      params.market === "SigUSD" && params.erg && params.erg > 0
+        ? toErgRaw(params.erg, "floor")
+        : undefined,
+    opening: openingRaw,
+    floor: floorRaw,
+    start: params.start != null ? Math.round(params.start) : undefined,
+    end: Math.round(params.end),
+    expiry: params.expiry != null ? Math.round(params.expiry) : undefined,
+    refundFeeNanoErg: params.refundFee != null ? toErgRaw(params.refundFee, "ceil") : undefined
+  };
+}
+
+export function buildFractionalizeBody(params: {
+  vault: "selective" | "dutch";
+  opening: number;
+  floor: number;
+  length?: number;
+  expiry?: number;
+}): Record<string, unknown> {
+  return {
+    vault: params.vault,
+    openingBps: Math.round(params.opening * 100),
+    floorBps: Math.round(params.floor * 100),
+    ...(params.length != null ? { length: Math.round(params.length) } : {}),
+    ...(params.expiry != null ? { expiry: Math.round(params.expiry) } : {})
+  };
+}
+
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> = {}) {
+  if (!raw) {
+    return {
+      walletErg: 0,
+      walletSigUsd: 0,
+      walletTokens: [] as ZcWalletToken[],
+      positions: [] as ZcPortfolioPosition[],
+      openOrders: [] as ZcAskSummary[],
+      openAsks: [] as ZcAskSummary[],
+      openOffers: [] as ZcOfferSummary[],
+      wraps: [] as ZcPortfolioWrap[]
+    };
+  }
+
+  const walletErg = fromErg(raw.wallet?.nanoErg ?? "0") ?? 0;
+  let walletSigUsd = 0;
+  const walletTokens: ZcWalletToken[] = [];
+  for (const t of raw.wallet?.tokens || []) {
+    const id = String(t.tokenId || "").toLowerCase();
+    if (id === SIGUSD_TOKEN_ID) {
+      walletSigUsd += fromRaw(t.amount, 2) ?? 0;
+    } else if (t.kind === "token" || t.kind === "wrapReceipt") {
+      const meta = tokenMap[id];
+      const known = VERIFIED_META_BY_ID.get(id);
+      const isReceipt = t.kind === "wrapReceipt" || meta?.kind === "wrapReceipt";
+      const decimals = isReceipt ? 0 : meta?.decimals ?? known?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
+      walletTokens.push({
+        id,
+        ticker:
+          meta?.ticker ||
+          meta?.name ||
+          known?.name ||
+          (isReceipt ? `ZCS-Wrap-${id.slice(0, 6)}` : id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
+        name: meta?.name || known?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
+        decimals,
+        amount: isReceipt ? Number(t.amount || 1) : fromRaw(t.amount, decimals) ?? 0,
+        rawAmount: String(t.amount ?? "0"),
+        kind: isReceipt ? "receipt" : "token",
+        verified: isReceipt || !!meta?.verified || !!known,
+        unverified: !isReceipt && !known && meta != null && !meta.verified
+      });
+    }
+  }
+
+  const positions: ZcPortfolioPosition[] = [];
+  for (const item of raw.lending || []) {
+    const bond: ZcBondSummary = adaptBond(item.bond, tokenMap) || {
+      id: item.shares?.bondId || item.tokenId,
+      market: "SigUSD",
+      principal: 0,
+      repayment: 0,
+      start: 0,
+      maturity: 0,
+      collateral: { erg: 0, usd: 0, tokens: [] },
+      rule: "maturity",
+      ratio: null,
+      oracleAge: 60,
+      cov: null,
+      vault: null,
+      state: item.status
+    };
+    if (item.shares?.type && item.shares.type !== "plain") {
+      bond.vault = item.shares.type;
+    }
+    const market = bond.market || "SigUSD";
+    const isShares = item.kind === "shares";
+    const actions: Record<string, ZcActionAvailability> = Object.fromEntries(
+      (item.actions || []).map((a: ZcActionAvailability) => [a.name, a])
+    );
+    positions.push({
+      id: item.tokenId,
+      tokenId: item.tokenId,
+      side: "lend",
+      kind: isShares ? "shares" : "unit",
+      units: Number(item.units || 1),
+      unitsRaw: String(item.units || "1"),
+      borrowedByMe: !!(item.borrowedByMe ?? bond.borrowedByMe ?? bond.mine),
+      status: item.status || "live",
+      bond,
+      shares: item.shares || null,
+      paid: item.cost?.paid != null ? fromMarket(item.cost.paid, market) : null,
+      at: item.cost?.height ?? null,
+      via: item.cost?.viaOffer ?? null,
+      mark: item.mark
+        ? {
+            basis: item.mark.basis,
+            bid: item.mark.bidBps ?? null,
+            value: item.mark.value != null ? fromMarket(item.mark.value, market) : null,
+            pnl: item.mark.pnl != null ? fromMarket(item.mark.pnl, market) : null,
+            entry: item.mark.entryBps ?? null,
+            atMaturity: item.mark.atMaturity != null ? fromMarket(item.mark.atMaturity, market) : null
+          }
+        : null,
+      actions,
+      settlement: bond.settlement ?? null
+    });
+  }
+
+  for (const item of raw.borrowing || []) {
+    const bond = adaptBond(item.bond, tokenMap);
+    if (!bond) continue;
+    const actions: Record<string, ZcActionAvailability> = Object.fromEntries(
+      (item.actions || []).map((a: ZcActionAvailability) => [a.name, a])
+    );
+    positions.push({
+      id: bond.id,
+      side: "borrow",
+      kind: "unit",
+      units: 1,
+      holdsUnit: !!item.holdsUnit,
+      borrowedByMe: true,
+      status: item.status === "liquidatable" ? "overdue" : item.status || "live",
+      bond,
+      actions
+    });
+  }
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const openOrders = (raw.open?.orders || []).map((o: any) => adaptAskSummary(o, tokenMap));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const openAsks = (raw.open?.asks || []).map((a: any) => adaptAskSummary(a, tokenMap));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const openOffers = (raw.open?.offers || []).map((o: any) => adaptOfferSummary(o));
+
+  const wraps: ZcPortfolioWrap[] = [
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(raw.open?.wrapRequests || []).map((r: any): ZcPortfolioWrap => {
+      const tid = String(r.token || "").toLowerCase();
+      const meta = tokenMap[tid];
+      const inner: ZcWalletToken = {
+        id: tid,
+        ticker: meta?.ticker || meta?.name || `${tid.slice(0, 6)}…`,
+        name: meta?.name || null,
+        decimals: meta?.decimals ?? 0,
+        amount: 1,
+        rawAmount: "1",
+        kind: "token"
+      };
+      return {
+        id: r.boxId,
+        boxId: r.boxId,
+        receipt: {
+          id: r.boxId,
+          ticker: `ZCS-Wrap-${tid.slice(0, 6)}`,
+          name: `Wrapped ${inner.name || inner.ticker}`,
+          decimals: 0,
+          amount: 1,
+          rawAmount: "1",
+          kind: "receipt",
+          verified: true
+        },
+        token: inner,
+        state: "requested",
+        pending: !!r.pending,
+        inWallet: false
+      };
+    }),
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    ...(raw.wraps || []).map((w: any): ZcPortfolioWrap => {
+      const tid = String(w.token || "").toLowerCase();
+      const rid = String(w.receiptId || w.boxId || "").toLowerCase();
+      const meta = tokenMap[tid];
+      const inner: ZcWalletToken = {
+        id: tid,
+        ticker: meta?.ticker || meta?.name || `${tid.slice(0, 6)}…`,
+        name: meta?.name || null,
+        decimals: meta?.decimals ?? 0,
+        amount: fromRaw(w.amount ?? "1", meta?.decimals ?? 0) ?? 1,
+        rawAmount: String(w.amount ?? "1"),
+        kind: "token"
+      };
+      return {
+        id: rid,
+        receiptId: rid,
+        vaultBoxId: w.vaultBoxId,
+        receipt: {
+          id: rid,
+          ticker: `ZCS-Wrap-${rid.slice(0, 6)}`,
+          name: `Wrapped ${inner.name || inner.ticker}`,
+          decimals: 0,
+          amount: 1,
+          rawAmount: "1",
+          kind: "receipt",
+          verified: true
+        },
+        token: inner,
+        state: w.state || "wrapped",
+        inWallet: !!w.inWallet
+      };
+    })
+  ];
+
+  return {
+    walletErg,
+    walletSigUsd,
+    walletTokens,
+    positions,
+    openOrders,
+    openAsks,
+    openOffers,
+    wraps
   };
 }
 
@@ -845,13 +1473,7 @@ export const zcApi = {
     id: string,
     tokenMap?: Record<string, ZcTokenMeta>,
     signal?: AbortSignal
-  ): Promise<{
-    type: string;
-    ask?: ZcAskSummary;
-    offer?: ZcOfferSummary;
-    current?: boolean;
-    spentBy?: string;
-  } | null> {
+  ): Promise<ZcLookupResult | null> {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = (useGraphql()
       ? await zcGraphqlEngine.lookupRaw(id, signal)
@@ -863,26 +1485,61 @@ export const zcApi = {
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const rec = (raw.record as any)?.current || raw.record;
     const type = String(raw.type || "");
+    const meta = {
+      current: typeof raw.current === "string" ? raw.current : null,
+      spentBy: typeof raw.spentBy === "string" ? raw.spentBy : null,
+      successorId: typeof raw.successorId === "string" ? raw.successorId : null,
+      note: typeof raw.note === "string" ? raw.note : null
+    };
+
     if ((type === "order" || type === "ask") && rec?.market) {
       return {
         type,
         ask: adaptAskSummary(rec, tokenMap),
-        current: Boolean(raw.current),
-        spentBy: raw.spentBy ? String(raw.spentBy) : undefined
+        ...meta
       };
     }
     if (type === "offer" && rec?.market) {
       return {
         type: "offer",
         offer: adaptOfferSummary(rec),
-        current: Boolean(raw.current),
-        spentBy: raw.spentBy ? String(raw.spentBy) : undefined
+        ...meta
+      };
+    }
+    if (type === "bond" && rec) {
+      const bond = adaptBond(rec, tokenMap);
+      return {
+        type: "bond",
+        bond: bond || undefined,
+        ...meta
+      };
+    }
+    if (type === "shares" && rec) {
+      const bondId = typeof rec.bondId === "string" ? rec.bondId : null;
+      let bond: ZcBondSummary | undefined;
+      if (bondId && isHex64(bondId)) {
+        try {
+          const bondLookup = await this.lookup(bondId, tokenMap, signal);
+          if (bondLookup?.bond) {
+            bond = {
+              ...bondLookup.bond,
+              vault: rec.type && rec.type !== "plain" ? String(rec.type) : bondLookup.bond.vault
+            };
+          }
+        } catch {
+          // fail-soft
+        }
+      }
+      return {
+        type: "shares",
+        bond,
+        shares: rec,
+        ...meta
       };
     }
     return {
       type,
-      current: Boolean(raw.current),
-      spentBy: raw.spentBy ? String(raw.spentBy) : undefined
+      ...meta
     };
   },
 

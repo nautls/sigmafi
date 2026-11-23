@@ -2,17 +2,19 @@
 import { ArrowRightIcon } from "@zhuowenli/vue-feather-icons";
 import { computed, ref, watch } from "vue";
 import { useRoute } from "vue-router";
-import { vDrawOnView } from "@/directives/vDrawOnView";
 import MarketCoin from "@/components/MarketCoin.vue";
+import { vDrawOnView } from "@/directives/vDrawOnView";
 import { useZcStore } from "@/stories/zcStore";
 import { ZcMarket } from "@/types/zc";
 import {
-  bestAskAt,
+  bestWindowAskAt,
   DAY_BLOCKS,
   DEFAULT_COVER,
+  fixedAskDots,
   formatApr,
   formatBlocksShort,
   lineAt,
+  visibleWindows,
   YEAR_BLOCKS
 } from "@/utils/zcMath";
 
@@ -64,26 +66,32 @@ const bidSamples = computed(() => {
 
 const askSamples = computed(() => {
   const c = curves.value;
-  if (!c) return [] as { x: number; y: number }[];
+  if (!c) return [] as { x: number; y: number | null }[];
+  const wins = visibleWindows(c);
+  if (!wins.length) return [] as { x: number; y: number | null }[];
   const daysSet = new Set<number>();
-  for (let d = 1; d <= MAX_DAYS; d += 5) daysSet.add(d);
-  for (const p of c.askLine) {
-    const day = p.d / DAY_BLOCKS;
-    if (day >= 0 && day <= MAX_DAYS) daysSet.add(day);
+  for (const w of wins) {
+    const loD = Math.max(1, w.min / DAY_BLOCKS);
+    const hiD = Math.min(MAX_DAYS, w.max / DAY_BLOCKS);
+    if (loD > hiD) continue;
+    if (loD > 1) daysSet.add(loD - 0.05);
+    daysSet.add(loD);
+    daysSet.add(hiD);
+    if (hiD < MAX_DAYS) daysSet.add(hiD + 0.05);
+    for (let i = 1; i < 20; i++) daysSet.add(loD + ((hiD - loD) * i) / 20);
   }
-  const sorted = [...daysSet].sort((a, b) => a - b);
-  const pts: { x: number; y: number }[] = [];
-  for (const d of sorted) {
-    const bps = bestAskAt(c, Math.round(d * DAY_BLOCKS));
-    if (bps != null) pts.push({ x: d, y: bps / 100 });
-  }
-  return pts;
+  return [...daysSet]
+    .sort((a, b) => a - b)
+    .map((d) => {
+      const bps = bestWindowAskAt(c, Math.round(d * DAY_BLOCKS));
+      return { x: d, y: bps != null ? bps / 100 : null };
+    });
 });
 
 const askDots = computed(() => {
   const c = curves.value;
   if (!c) return [];
-  return c.dots
+  return fixedAskDots(c)
     .filter((d) => d.d / DAY_BLOCKS <= MAX_DAYS)
     .map((d) => ({
       id: d.id,
@@ -97,7 +105,7 @@ const askDots = computed(() => {
 const yMax = computed(() => {
   const vals: number[] = [
     ...bidSamples.value.map((p) => p.y),
-    ...askSamples.value.map((p) => p.y),
+    ...askSamples.value.map((p) => p.y).filter((v): v is number => v != null),
     ...askDots.value.map((p) => p.y)
   ];
   if (!vals.length) return 16;
@@ -124,11 +132,18 @@ function pxY(pctVal: number): number {
   return PAD.t + (1 - clamped / yMax.value) * plotH;
 }
 
-function buildLinePath(pts: { x: number; y: number }[]): string {
-  if (pts.length < 2) return "";
-  return pts
-    .map((p, i) => `${i === 0 ? "M" : "L"}${pxX(p.x).toFixed(1)},${pxY(p.y).toFixed(1)}`)
-    .join(" ");
+function buildLinePath(pts: { x: number; y: number | null }[]): string {
+  let d = "";
+  let open = false;
+  for (const p of pts) {
+    if (p.y == null || !Number.isFinite(p.y)) {
+      open = false;
+      continue;
+    }
+    d += `${open ? "L" : "M"}${pxX(p.x).toFixed(1)},${pxY(p.y).toFixed(1)}`;
+    open = true;
+  }
+  return d;
 }
 
 const bidPath = computed(() => buildLinePath(bidSamples.value));
@@ -150,7 +165,7 @@ const activeReadout = computed(() => {
   const blocks = day * DAY_BLOCKS;
   const c = curves.value;
   const bidBps = c ? lineAt(c.bidLine, blocks) : null;
-  let askBps = bestAskAt(c, blocks);
+  let askBps = bestWindowAskAt(c, blocks);
 
   if (askBps == null && c && c.dots.length > 0) {
     let bestDot: { dist: number; y: number } | null = null;
@@ -310,8 +325,8 @@ function marketCount(m: ZcMarket): number {
     <!-- Coordinate Plane SVG -->
     <div class="relative bg-[color:var(--sf-card)] px-2 pt-3 pb-1 sm:px-3">
       <svg
-        v-draw-on-view
         :key="market"
+        v-draw-on-view
         :viewBox="`0 0 ${VB_W} ${VB_H}`"
         class="h-[214px] w-full select-none sm:h-[234px]"
         :class="{ 'cursor-crosshair': hasCurveData }"
@@ -544,7 +559,7 @@ function marketCount(m: ZcMarket): number {
         :to="`/app?market=${market}&days=${selectedTenor}`"
         class="inline-flex items-center gap-1.5 rounded-lg border border-cobalt-600/25 bg-cobalt-50 px-3 py-1.5 text-[12px] font-semibold text-cobalt-700 transition-colors hover:bg-cobalt-100"
       >
-        <span>Rate Book</span>
+        <span>Yield Curve</span>
         <arrow-right-icon class="h-3.5 w-3.5" />
       </router-link>
     </div>

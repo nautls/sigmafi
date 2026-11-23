@@ -1,9 +1,21 @@
 import { chunk } from "@fleet-sdk/common";
 import { ChainAsset, ChainBox, holdsOracleNft, readZcOracle, ZcOracle } from "./boxes";
+import {
+  ChainState,
+  ChainTransaction,
+  ChainTxDataInput,
+  ChainTxInput,
+  GraphqlTokenInfo,
+  withTimeoutSignal,
+  ZcChainClient
+} from "./chainClient";
 import { ALL_ZC_BOX_TREES, ZC_ORACLE_V2_ERGO_TREE } from "./contracts";
 import { ZcApiError } from "./errors";
 
-export const DEFAULT_MAINNET_GRAPHQL_URL = "https://explore.sigmaspace.io/api/graphql/";
+export type { ChainState, ChainTransaction, ChainTxDataInput, ChainTxInput, GraphqlTokenInfo };
+
+export const DEFAULT_MAINNET_GRAPHQL_URL = "https://api.ergoscan.me/v1/graphql";
+export const SIGMASPACE_GRAPHQL_URL = "https://explore.sigmaspace.io/api/graphql/";
 export const DEFAULT_TESTNET_GRAPHQL_URL = "https://tn-ergo-explorer.anetabtc.io/graphql";
 
 const TREE_CHUNK_SIZE = 20;
@@ -13,42 +25,7 @@ const BOX_ID_CHUNK_SIZE = 20;
 const TX_ID_CHUNK_SIZE = 10;
 const TOKEN_ID_CHUNK_SIZE = 20;
 const TX_ADDR_PAGE_SIZE = 25;
-
-export interface ChainState {
-  readonly height: number;
-  readonly blockId: string;
-  readonly network: string;
-}
-
-export interface ChainTxInput {
-  readonly boxId: string;
-  readonly index: number;
-  readonly extension: Readonly<Record<string, string>>;
-  readonly box: ChainBox | null;
-}
-
-export interface ChainTxDataInput {
-  readonly boxId: string;
-  readonly index: number;
-  readonly box: ChainBox | null;
-}
-
-export interface ChainTransaction {
-  readonly transactionId: string;
-  readonly inclusionHeight: number;
-  readonly timestamp: number;
-  readonly inputs: readonly ChainTxInput[];
-  readonly dataInputs: readonly ChainTxDataInput[];
-  readonly outputs: readonly ChainBox[];
-}
-
-export interface GraphqlTokenInfo {
-  readonly tokenId: string;
-  readonly name: string | null;
-  readonly decimals: number | null;
-  readonly description: string | null;
-  readonly emissionAmount: string | null;
-}
+const REQUEST_TIMEOUT_MS = 15_000;
 
 interface RawAsset {
   tokenId: string;
@@ -65,6 +42,7 @@ interface RawBox {
   ergoTree: string;
   assets?: RawAsset[] | null;
   additionalRegisters?: Record<string, string> | null;
+  spentTransactionId?: string | null;
   spentBy?: {
     transactionId?: string | null;
     transaction?: { inclusionHeight?: number | null } | null;
@@ -83,7 +61,7 @@ interface RawTx {
   }[] | null;
   dataInputs?: {
     boxId: string;
-    index: number;
+    index?: number | null;
     box?: RawBox | null;
   }[] | null;
   outputs?: RawBox[] | null;
@@ -123,7 +101,7 @@ const UNSPENT_BOXES_QUERY = `
   }
 `;
 
-const BOXES_BY_IDS_QUERY = `
+const BOXES_BY_IDS_FULL_QUERY = `
   query ZcBoxesByIds($boxIds: [String!]!) {
     boxes(boxIds: $boxIds, take: 50) {
       ${BOX_FIELDS}
@@ -135,7 +113,15 @@ const BOXES_BY_IDS_QUERY = `
   }
 `;
 
-const TX_FIELDS = `
+const BOXES_BY_IDS_COMPACT_QUERY = `
+  query ZcBoxesByIdsCompact($boxIds: [String!]!) {
+    boxes(boxIds: $boxIds, take: 50) {
+      ${BOX_FIELDS}
+    }
+  }
+`;
+
+const TX_FIELDS_FULL = `
   transactionId
   inclusionHeight
   timestamp
@@ -163,18 +149,54 @@ const TX_FIELDS = `
   }
 `;
 
-const TXS_BY_IDS_QUERY = `
+const TX_FIELDS_COMPACT = `
+  transactionId
+  inclusionHeight
+  timestamp
+  inputs {
+    boxId
+    index
+    extension
+    box {
+      ${BOX_FIELDS}
+    }
+  }
+  dataInputs {
+    boxId
+  }
+  outputs {
+    ${BOX_FIELDS}
+  }
+`;
+
+const TXS_BY_IDS_FULL_QUERY = `
   query ZcTransactionsByIds($txIds: [String!]!) {
     transactions(transactionIds: $txIds, take: 20) {
-      ${TX_FIELDS}
+      ${TX_FIELDS_FULL}
     }
   }
 `;
 
-const TXS_BY_ADDRESSES_QUERY = `
+const TXS_BY_IDS_COMPACT_QUERY = `
+  query ZcTransactionsByIdsCompact($txIds: [String!]!) {
+    transactions(transactionIds: $txIds, take: 20) {
+      ${TX_FIELDS_COMPACT}
+    }
+  }
+`;
+
+const TXS_BY_ADDRESSES_FULL_QUERY = `
   query ZcTransactionsByAddresses($addresses: [String!]!, $minHeight: Int!, $skip: Int!, $take: Int!) {
     transactions(addresses: $addresses, minHeight: $minHeight, skip: $skip, take: $take) {
-      ${TX_FIELDS}
+      ${TX_FIELDS_FULL}
+    }
+  }
+`;
+
+const TXS_BY_ADDRESSES_COMPACT_QUERY = `
+  query ZcTransactionsByAddressesCompact($addresses: [String!]!, $minHeight: Int!, $skip: Int!, $take: Int!) {
+    transactions(addresses: $addresses, minHeight: $minHeight, skip: $skip, take: $take) {
+      ${TX_FIELDS_COMPACT}
     }
   }
 `;
@@ -202,6 +224,7 @@ function mapBox(raw: RawBox): ChainBox {
       if (typeof v === "string" && v.length > 0) regs[k] = v;
     }
   }
+  const spentTxId = raw.spentBy?.transactionId ?? raw.spentTransactionId ?? null;
   return {
     boxId: String(raw.boxId).toLowerCase(),
     transactionId: String(raw.transactionId).toLowerCase(),
@@ -212,9 +235,7 @@ function mapBox(raw: RawBox): ChainBox {
     ergoTree: String(raw.ergoTree).toLowerCase(),
     assets,
     additionalRegisters: regs,
-    spentTransactionId: raw.spentBy?.transactionId
-      ? String(raw.spentBy.transactionId).toLowerCase()
-      : null,
+    spentTransactionId: spentTxId ? String(spentTxId).toLowerCase() : null,
     spendingHeight:
       raw.spentBy?.transaction?.inclusionHeight != null
         ? Number(raw.spentBy.transaction.inclusionHeight)
@@ -233,9 +254,9 @@ function mapTx(raw: RawTx): ChainTransaction {
     .sort((a, b) => a.index - b.index);
 
   const dataInputs: ChainTxDataInput[] = (raw.dataInputs ?? [])
-    .map((di) => ({
+    .map((di, idx) => ({
       boxId: String(di.boxId).toLowerCase(),
-      index: Number(di.index ?? 0),
+      index: Number(di.index ?? idx),
       box: di.box ? mapBox(di.box) : null
     }))
     .sort((a, b) => a.index - b.index);
@@ -254,11 +275,31 @@ function mapTx(raw: RawTx): ChainTransaction {
   };
 }
 
-export class ZcGraphqlClient {
+function isFieldSchemaError(err: unknown): boolean {
+  if (!(err instanceof ZcApiError)) return false;
+  return /Cannot query field/i.test(err.message);
+}
+
+/**
+ * If the GraphQL endpoint sits on a REST-capable host (e.g. `https://api.ergoscan.me/v1/graphql`),
+ * returns its sibling REST prefix (`https://api.ergoscan.me/v1`) for enriching `spentTransactionId`
+ * when the GraphQL `Box` type omits `spentBy`.
+ */
+function siblingRestBase(gqlEndpoint: string): string | null {
+  const clean = gqlEndpoint.trim().replace(/\/+$/, "");
+  if (clean.endsWith("/v1/graphql")) {
+    return clean.slice(0, -"/graphql".length);
+  }
+  return null;
+}
+
+export class ZcGraphqlClient implements ZcChainClient {
   private endpoint: string;
+  private compactSchema: boolean;
 
   constructor(endpoint = DEFAULT_MAINNET_GRAPHQL_URL) {
     this.endpoint = endpoint;
+    this.compactSchema = endpoint.includes("ergoscan");
   }
 
   getEndpoint(): string {
@@ -267,6 +308,7 @@ export class ZcGraphqlClient {
 
   setEndpoint(url: string): void {
     this.endpoint = url.trim() || DEFAULT_MAINNET_GRAPHQL_URL;
+    this.compactSchema = this.endpoint.includes("ergoscan");
   }
 
   private async query<T>(
@@ -274,6 +316,7 @@ export class ZcGraphqlClient {
     variables: Record<string, unknown>,
     signal?: AbortSignal
   ): Promise<T> {
+    const timeout = withTimeoutSignal(signal, REQUEST_TIMEOUT_MS);
     let res: Response;
     try {
       res = await fetch(this.endpoint, {
@@ -283,12 +326,18 @@ export class ZcGraphqlClient {
           Accept: "application/json"
         },
         body: JSON.stringify({ query, variables }),
-        signal
+        signal: timeout.signal
       });
     } catch (err) {
-      if ((err as Error)?.name === "AbortError") throw err;
-      throw new ZcApiError("Ergo GraphQL endpoint unreachable", 0, err);
+      timeout.cleanup();
+      if (signal?.aborted) throw err;
+      throw new ZcApiError(
+        timeout.didTimeout() ? "Ergo GraphQL endpoint timed out" : "Ergo GraphQL endpoint unreachable",
+        0,
+        err
+      );
     }
+    timeout.cleanup();
 
     const text = await res.text();
     let json: GraphqlResponse<T> | null = null;
@@ -312,6 +361,26 @@ export class ZcGraphqlClient {
     }
 
     return json.data;
+  }
+
+  private async queryAdaptive<T>(
+    fullQuery: string,
+    compactQuery: string,
+    variables: Record<string, unknown>,
+    signal?: AbortSignal
+  ): Promise<T> {
+    if (this.compactSchema) {
+      return this.query<T>(compactQuery, variables, signal);
+    }
+    try {
+      return await this.query<T>(fullQuery, variables, signal);
+    } catch (err) {
+      if (isFieldSchemaError(err)) {
+        this.compactSchema = true;
+        return this.query<T>(compactQuery, variables, signal);
+      }
+      throw err;
+    }
   }
 
   async fetchStateAndOracle(
@@ -379,7 +448,12 @@ export class ZcGraphqlClient {
     const batches = chunk(unique, BOX_ID_CHUNK_SIZE);
     const results = await Promise.all(
       batches.map((ids) =>
-        this.query<{ boxes: RawBox[] }>(BOXES_BY_IDS_QUERY, { boxIds: ids }, signal)
+        this.queryAdaptive<{ boxes: RawBox[] }>(
+          BOXES_BY_IDS_FULL_QUERY,
+          BOXES_BY_IDS_COMPACT_QUERY,
+          { boxIds: ids },
+          signal
+        )
       )
     );
 
@@ -389,6 +463,30 @@ export class ZcGraphqlClient {
         out.set(mapped.boxId, mapped);
       }
     }
+
+    // If compact GraphQL schema omitted `spentBy`, enrich `spentTransactionId` via sibling REST if available
+    const restBase = this.compactSchema ? siblingRestBase(this.endpoint) : null;
+    if (restBase && out.size > 0) {
+      await Promise.all(
+        Array.from(out.values()).map(async (box) => {
+          if (box.spentTransactionId) return;
+          try {
+            const r = await fetch(`${restBase}/boxes/${box.boxId}`, { signal });
+            if (!r.ok) return;
+            const j = (await r.json()) as { spentTransactionId?: string | null };
+            if (j?.spentTransactionId) {
+              out.set(box.boxId, {
+                ...box,
+                spentTransactionId: String(j.spentTransactionId).toLowerCase()
+              });
+            }
+          } catch {
+            // fail-soft
+          }
+        })
+      );
+    }
+
     return out;
   }
 
@@ -403,7 +501,12 @@ export class ZcGraphqlClient {
     const batches = chunk(unique, TX_ID_CHUNK_SIZE);
     const results = await Promise.all(
       batches.map((ids) =>
-        this.query<{ transactions: RawTx[] }>(TXS_BY_IDS_QUERY, { txIds: ids }, signal)
+        this.queryAdaptive<{ transactions: RawTx[] }>(
+          TXS_BY_IDS_FULL_QUERY,
+          TXS_BY_IDS_COMPACT_QUERY,
+          { txIds: ids },
+          signal
+        )
       )
     );
 
@@ -428,8 +531,9 @@ export class ZcGraphqlClient {
 
     for (let page = 0; page < maxPages; page++) {
       const skip = page * TX_ADDR_PAGE_SIZE;
-      const data = await this.query<{ transactions: RawTx[] }>(
-        TXS_BY_ADDRESSES_QUERY,
+      const data = await this.queryAdaptive<{ transactions: RawTx[] }>(
+        TXS_BY_ADDRESSES_FULL_QUERY,
+        TXS_BY_ADDRESSES_COMPACT_QUERY,
         { addresses: [...addresses], minHeight: clampedMin, skip, take: TX_ADDR_PAGE_SIZE },
         signal
       );

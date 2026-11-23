@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { FilterIcon, SearchIcon, XIcon } from "@zhuowenli/vue-feather-icons";
+import { FilterIcon } from "@zhuowenli/vue-feather-icons";
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from "vue";
 import { useRoute } from "vue-router";
 import AskInspector from "./components/AskInspector.vue";
@@ -11,6 +11,7 @@ import OrderLadderPanel from "./components/OrderLadderPanel.vue";
 import OrderLedgerTable from "./components/OrderLedgerTable.vue";
 import OrderTicketPanel from "./components/OrderTicketPanel.vue";
 import RateBookCanvas from "./components/RateBookCanvas.vue";
+import ZcSelect, { ZcSelectOption } from "./components/ZcSelect.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
 import { zcApi, ZcTokenMeta } from "@/services/zcApi";
 import { useZcStore } from "@/stories/zcStore";
@@ -21,15 +22,13 @@ import {
   ZcOfferSummary,
   ZcOrderbook,
   ZcRateBookFilters,
-  ZcSearchHit,
   ZcSortKey,
   ZcSourceKind
 } from "@/types/zc";
 import { shortenString } from "@/utils";
 import {
   bandFor,
-  bestAskOverall,
-  bestBidOverall,
+  dateAtHeight,
   DAY_BLOCKS,
   DEFAULT_COVER,
   formatApr,
@@ -37,24 +36,47 @@ import {
   formatBp,
   formatCompact,
   formatDur,
+  formatDurCell,
   formatMarketAmount,
   isBookRowRefreshingOnly,
   isHex64,
   isOracleRefreshingOnly,
+  kindLabel,
+  lineAt,
   MIN_COVER,
   MIN_MATURITY_BLOCKS,
+  pricingName,
+  resolvedAskQuote,
   YEAR_BLOCKS
 } from "@/utils/zcMath";
 
 const TENORS = [7, 30, 60, 90, 180, 365] as const;
 const COVERS = [125, 150, 175, 200, 250] as const;
 
+const COVER_OPTIONS: readonly ZcSelectOption[] = COVERS.map((c) => ({
+  value: c,
+  label: `≥ ${c}% cover`,
+  shortLabel: `≥${c}%`
+}));
+
+const SOURCE_OPTIONS: readonly ZcSelectOption[] = [
+  { value: "all", label: "All sources" },
+  { value: "new", label: "New loans" },
+  { value: "resale", label: "Resale" },
+  { value: "shares", label: "Shares" }
+];
+
 const EMPTY_BOOK: ZcOrderbook = {
   asks: [],
   bids: [],
   bestAsk: null,
   bestBid: null,
+  anchorBlocks: null,
+  anchorBid: null,
   spread: null,
+  spreadD: null,
+  spreadBid: null,
+  spreadAsk: null,
   lo: MIN_MATURITY_BLOCKS,
   hi: YEAR_BLOCKS,
   band: null,
@@ -87,9 +109,6 @@ const filterMenuRef = ref<HTMLElement | null>(null);
 
 const ledgerTab = ref<"asks" | "bids" | "fills">("asks");
 const sort = ref<ZcSortKey>("apr");
-const searchQuery = ref<string>("");
-const searchHits = ref<ZcSearchHit[]>([]);
-const searchFocused = ref<boolean>(false);
 
 const selected = ref<{ type: "ask" | "bid"; id: string } | null>(null);
 const lookupAsk = ref<ZcAskSummary | null>(null);
@@ -99,13 +118,13 @@ const previewPayload = ref<ExecutionPreviewPayload | null>(null);
 
 const ticketPrefill = ref<{
   seq: number;
-  side?: "lend" | "borrow";
+  side?: "lend" | "borrow" | "sell";
   amount?: string;
   days?: number;
   apr?: number | null;
 } | null>(null);
 
-// Sync deep-link query params (e.g. from Landing Page SimpleQuoteCard!)
+// Sync deep-link query params (e.g. from Landing Page CTAs)
 watch(
   () => route.query,
   (q) => {
@@ -121,11 +140,12 @@ watch(
     if (Number.isFinite(qCover) && qCover >= MIN_COVER && qCover <= 300) {
       coverage.value = Math.round(qCover);
     }
-    if (q.side === "lend" || q.side === "borrow" || q.amount || q.apr) {
+    if (q.side === "lend" || q.side === "borrow" || q.side === "sell" || q.amount || q.apr) {
       const qApr = typeof q.apr === "string" && q.apr !== "" ? Number(q.apr) : null;
       ticketPrefill.value = {
         seq: Date.now(),
-        side: q.side === "borrow" ? "borrow" : q.side === "lend" ? "lend" : undefined,
+        side:
+          q.side === "borrow" || q.side === "lend" || q.side === "sell" ? q.side : undefined,
         amount: typeof q.amount === "string" ? q.amount : undefined,
         days: Number.isFinite(qDays) ? Math.round(qDays) : undefined,
         apr: qApr != null && Number.isFinite(qApr) ? qApr : null
@@ -133,6 +153,16 @@ watch(
     }
   },
   { immediate: true }
+);
+
+// React to global header search selection
+watch(
+  () => zc.pendingSelect?.seq,
+  () => {
+    const req = zc.pendingSelect;
+    if (!req) return;
+    selected.value = { type: req.type, id: req.id };
+  }
 );
 
 // Clear selection on market switch
@@ -157,7 +187,11 @@ const activeFilters = computed<ZcRateBookFilters>(() => ({
 }));
 
 const extraFilterCount = computed(
-  () => Number(grid.value) + Number(follow.value) + Number(showOffers.value) + Number(!showFills.value)
+  () =>
+    Number(grid.value) +
+    Number(follow.value) +
+    Number(showOffers.value) +
+    Number(!showFills.value)
 );
 
 /* ============================================================
@@ -258,7 +292,10 @@ async function fetchRateBook() {
   const tableRange = follow.value
     ? upto.value
       ? { from: MIN_MATURITY_BLOCKS, to: targetBlocks.value }
-      : { from: Math.max(1, targetBlocks.value - bandBlocks.value), to: targetBlocks.value + bandBlocks.value }
+      : {
+          from: Math.max(1, targetBlocks.value - bandBlocks.value),
+          to: targetBlocks.value + bandBlocks.value
+        }
     : {};
 
   const fromHeight = zc.height > 0 ? Math.max(0, zc.height - 7200) : 0;
@@ -270,7 +307,11 @@ async function fetchRateBook() {
 
   try {
     const [curvesRes, obRes, asksPage, offersPage, fillsRes] = await Promise.all([
-      zcApi.getCurves(m, { coverage: covBps, kind: k, matchable: queryMatchable, grid: g }, ac.signal),
+      zcApi.getCurves(
+        m,
+        { coverage: covBps, kind: k, matchable: queryMatchable, grid: g },
+        ac.signal
+      ),
       zcApi.getOrderbook(
         m,
         { coverage: covBps, kind: k, matchable: queryMatchable, grid: g, ...obRange },
@@ -305,7 +346,11 @@ async function fetchRateBook() {
       ),
       zcApi
         .listFillsResult(m, { fromHeight, kind: apiFillKind, limit: 200 }, ac.signal)
-        .catch(() => ({ items: [] as ZcFillSummary[], status: "not-configured", indexedTo: null }))
+        .catch(() => ({
+          items: [] as ZcFillSummary[],
+          status: "not-configured",
+          indexedTo: null
+        }))
     ]);
 
     if (ac.signal.aborted) return;
@@ -429,7 +474,7 @@ const orderbook = computed<ZcOrderbook>(() => {
   };
 });
 
-// Lookup fallback when selected ID isn't in the loaded asks/offers page
+// Lookup fallback when selected ID isn't in loaded asks/offers page
 const pageAsk = computed(() =>
   selected.value?.type === "ask"
     ? asksState.items.find((a) => a.id === selected.value?.id) || null
@@ -466,45 +511,13 @@ watch([selected, pageAsk, pageOffer, () => zc.connected, () => zc.revision], asy
   }
 });
 
-const selectedAsk = computed(() => pageAsk.value || (selected.value?.type === "ask" ? lookupAsk.value : null));
-const selectedOffer = computed(() => pageOffer.value || (selected.value?.type === "bid" ? lookupOffer.value : null));
+const selectedAsk = computed(
+  () => pageAsk.value || (selected.value?.type === "ask" ? lookupAsk.value : null)
+);
+const selectedOffer = computed(
+  () => pageOffer.value || (selected.value?.type === "bid" ? lookupOffer.value : null)
+);
 
-// Remote hex search (when >= 6 hex chars entered)
-let searchTimer: number | null = null;
-let searchAc: AbortController | null = null;
-watch(searchQuery, (val) => {
-  if (searchTimer !== null) window.clearTimeout(searchTimer);
-  if (searchAc) searchAc.abort();
-  const clean = val.trim().toLowerCase();
-  if (!zc.connected || clean.length < 6 || !/^[0-9a-f]+$/.test(clean)) {
-    searchHits.value = [];
-    return;
-  }
-  searchTimer = window.setTimeout(async () => {
-    const ac = new AbortController();
-    searchAc = ac;
-    try {
-      const hits = await zcApi.search(clean, ac.signal);
-      if (!ac.signal.aborted) searchHits.value = hits.slice(0, 6);
-    } catch {
-      if (!ac.signal.aborted) searchHits.value = [];
-    }
-  }, 240);
-});
-
-function pickSearchHit(hit: ZcSearchHit) {
-  if (hit.market && (hit.market === "ERG" || hit.market === "SigUSD")) {
-    zc.setActiveMarket(hit.market);
-  }
-  if (hit.type === "offer") {
-    selected.value = { type: "bid", id: hit.id };
-  } else {
-    selected.value = { type: "ask", id: hit.id };
-  }
-  searchFocused.value = false;
-}
-
-// Click-outside for More Filters popover
 function onDocClick(e: MouseEvent) {
   if (!filtersOpen.value) return;
   if (filterMenuRef.value && !filterMenuRef.value.contains(e.target as Node)) {
@@ -512,21 +525,92 @@ function onDocClick(e: MouseEvent) {
   }
 }
 
-onMounted(() => document.addEventListener("mousedown", onDocClick));
+function onEscKey(e: KeyboardEvent) {
+  if (e.key !== "Escape") return;
+  if (filtersOpen.value) {
+    filtersOpen.value = false;
+    return;
+  }
+  if (previewPayload.value) return;
+  const tag = (e.target as HTMLElement | null)?.tagName;
+  if (tag === "INPUT" || tag === "TEXTAREA" || tag === "SELECT") return;
+  if (selected.value) selected.value = null;
+}
+
+onMounted(() => {
+  document.addEventListener("mousedown", onDocClick);
+  document.addEventListener("keydown", onEscKey);
+});
+
 onBeforeUnmount(() => {
   document.removeEventListener("mousedown", onDocClick);
+  document.removeEventListener("keydown", onEscKey);
   fetchAc?.abort();
   lookupAc?.abort();
-  searchAc?.abort();
-  if (searchTimer !== null) window.clearTimeout(searchTimer);
 });
 
 function selectAsk(id: string) {
-  selected.value = selected.value?.type === "ask" && selected.value.id === id ? null : { type: "ask", id };
+  selected.value =
+    selected.value?.type === "ask" && selected.value.id === id ? null : { type: "ask", id };
 }
 
 function selectBid(id: string) {
-  selected.value = selected.value?.type === "bid" && selected.value.id === id ? null : { type: "bid", id };
+  selected.value =
+    selected.value?.type === "bid" && selected.value.id === id ? null : { type: "bid", id };
+}
+
+function handleQuickFund(ask: ZcAskSummary) {
+  const q = resolvedAskQuote(ask, zc.height);
+  if (!q) {
+    selected.value = { type: "ask", id: ask.id };
+    return;
+  }
+  const m = ask.market;
+  const buyback = !!ask.borrowedByMe && ask.kind !== "order" && !ask.owner;
+  const rule = ask.bond?.rule || ask.rule;
+  const ratio = ask.bond?.ratio ?? ask.ratio;
+  previewPayload.value = {
+    title:
+      ask.kind === "order"
+        ? `Fund ${m} Borrow Order`
+        : buyback
+          ? `Buy Back Your ${ask.kind === "shares" ? "Shares" : "Bond"}`
+          : `Buy ${kindLabel(ask.kind)} (${m})`,
+    subtitle: `${pricingName(ask)} · ${shortenString(ask.id, 14)}`,
+    badge: ask.kind === "order" ? "Direct Lend" : buyback ? "Loan Buyback" : "Secondary Buy",
+    tone: "bid",
+    heroLabel: ask.kind === "order" ? "You fund now" : "You pay now",
+    heroValue: formatMarketAmount(q.cost, m),
+    heroSub: `${formatApr(q.yieldBps)} APR · ${q.pct.toFixed(2)}% of face`,
+    rows: [
+      { label: "Claim at maturity", value: formatMarketAmount(q.face, m) },
+      { label: "Gross interest", value: `+${formatMarketAmount(q.face - q.cost, m)}`, tone: "bid" },
+      {
+        label: "Maturity",
+        value: `${dateAtHeight(zc.height + q.d, zc.height)} · ${formatDur(q.d, zc.durationUnit)}`
+      },
+      {
+        label: "Collateral cover",
+        value:
+          rule === "oracle"
+            ? `${ask.cov != null ? Math.round(ask.cov) : "—"}% (liq. < ${ratio ?? "—"}%)`
+            : "Maturity rule"
+      },
+      ...(ask.kind === "order"
+        ? [{ label: "Fee reserve", value: "0.05 ERG (returned)" }]
+        : [])
+    ],
+    rawSummary: {
+      action: ask.kind === "order" ? "fillOrder" : "buyAsk",
+      boxId: ask.id,
+      market: m,
+      cost: q.cost,
+      face: q.face,
+      yieldBps: Math.round(q.yieldBps),
+      blocksLeft: q.d,
+      maturity: q.maturity
+    }
+  };
 }
 
 function handleBorrowAgainstOffer(params: { aprPct: number; days: number }) {
@@ -535,6 +619,17 @@ function handleBorrowAgainstOffer(params: { aprPct: number; days: number }) {
   ticketPrefill.value = {
     seq: Date.now(),
     side: "borrow",
+    days: params.days,
+    apr: params.aprPct
+  };
+}
+
+function handleSellAgainstOffer(params: { aprPct: number; days: number }) {
+  selected.value = null;
+  targetBlocks.value = params.days * DAY_BLOCKS;
+  ticketPrefill.value = {
+    seq: Date.now(),
+    side: "sell",
     days: params.days,
     apr: params.aprPct
   };
@@ -556,404 +651,421 @@ function chipLabel(days: number): string {
   return `${prefix}${days === 365 ? "1y" : `${days}d`}`;
 }
 
-// Market Pulse Telemetry KPIs
+// Live Market Telemetry KPIs — always curve-consistent (same-maturity spread, never cross-maturity)
 const pulse = computed(() => {
   const c = curves.value;
-  const bestBid = orderbook.value.bestBid ?? bestBidOverall(c);
-  const bestAsk = orderbook.value.bestAsk ?? bestAskOverall(c);
-  const spread = orderbook.value.spread ?? (bestBid != null && bestAsk != null ? bestBid - bestAsk : null);
+  const ob = orderbook.value;
+  const hasMatchedSpread =
+    ob.spread != null && ob.spreadBid != null && ob.spreadAsk != null;
+  const bidAtCursor = ob.anchorBid ?? (c ? lineAt(c.bidLine, targetBlocks.value) : null);
+  const bestBid = hasMatchedSpread ? ob.spreadBid : bidAtCursor ?? ob.bestBid;
+  const bestAsk = hasMatchedSpread ? ob.spreadAsk : ob.bestAsk;
+  const spread = hasMatchedSpread ? ob.spread : null;
+  const spreadD = hasMatchedSpread ? ob.spreadD : null;
+  const refTenorBlocks = spreadD ?? (bestBid != null ? targetBlocks.value : null);
   const offerCap = c?.totals.offers.capital ?? 0;
   const askCost = c?.totals.asks.cost ?? 0;
+  const totalDepth = offerCap + askCost;
+  const bidSharePct = totalDepth > 0 ? Math.round((offerCap / totalDepth) * 100) : 50;
   const mult = zc.activeMarket === "ERG" ? zc.oracle.price : 1;
   return {
     bestBid,
     bestAsk,
     spread,
+    spreadD,
+    refTenorBlocks,
     crossed: spread != null && spread <= 0,
     offerCap,
     offerCount: c?.totals.offers.matchable ?? 0,
     offerUsd: mult > 0 ? offerCap * mult : null,
     askCost,
     askCount: c?.totals.asks.matchable ?? 0,
-    askUsd: mult > 0 ? askCost * mult : null
+    askUsd: mult > 0 ? askCost * mult : null,
+    bidSharePct
   };
 });
 </script>
 
 <template>
   <!-- ========================================================
-       RATE BOOK WORKSPACE (/app)
+       RATE BOOK TRADING WORKSPACE (/app) — Single-Screen Desktop
        ======================================================== -->
-  <div v-if="section === 'market'" class="space-y-5">
-    <!-- Title + Quick Search + Market Pulse Ribbon -->
-    <header class="space-y-4">
-      <div class="flex flex-wrap items-end justify-between gap-4">
-        <div class="flex items-center gap-3.5">
-          <market-coin :market="zc.activeMarket" :size="38" />
-          <div>
-            <div class="flex flex-wrap items-center gap-2.5">
-              <h1 class="sf-serif text-[30px] font-semibold leading-none text-[color:var(--sf-ink)] sm:text-[34px]">
-                {{ zc.activeMarket }} Rate Book
-              </h1>
-              <span
-                class="sf-mono rounded-md border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] px-2 py-0.5 text-[10.5px] font-medium text-[color:var(--sf-muted)]"
-              >
-                zcs1 · simple APR
-              </span>
-            </div>
-            <p class="mt-1 text-[13px] text-[color:var(--sf-muted)]">
-              Peer-to-peer zero-coupon term structure, maturity ladder, and collateral risk map.
-            </p>
-          </div>
+  <div
+    v-if="section === 'market'"
+    class="flex min-h-0 flex-1 flex-col gap-3"
+  >
+    <!-- Unified Market Telemetry + Precision Control Ribbon -->
+    <section
+      class="sf-terminal-plate flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-[16px] rounded-tl-[5px] px-3 py-2 sm:px-3.5"
+      role="toolbar"
+      aria-label="Yield Curve telemetry and filters"
+    >
+      <!-- LEFT: High-Contrast Market Telemetry Strip -->
+      <div class="flex flex-wrap items-center gap-x-4 gap-y-1.5">
+        <div class="flex items-center gap-2.5">
+          <market-coin :market="zc.activeMarket" :size="30" bare />
+          <h1 class="sf-display text-[19px] font-bold leading-none tracking-[-0.03em] text-[color:var(--sf-ink)]">
+            {{ zc.activeMarket }}
+          </h1>
         </div>
 
-        <!-- Quick ID / Box Search -->
-        <div class="relative w-full sm:w-72">
-          <div
-            class="flex items-center gap-2 rounded-xl border border-[color:var(--sf-line-strong)] bg-[color:var(--sf-card)] px-3 py-2 focus-within:border-cobalt-600"
-          >
-            <search-icon class="h-3.5 w-3.5 shrink-0 text-[color:var(--sf-muted)]" />
-            <input
-              v-model="searchQuery"
-              type="text"
-              placeholder="Filter or lookup box ID…"
-              aria-label="Filter or lookup order by box ID"
-              class="sf-mono w-full min-w-0 bg-transparent text-[12px] text-[color:var(--sf-ink)] placeholder-[color:var(--sf-dim)] outline-none"
-              @focus="searchFocused = true"
-              @blur="searchFocused = false"
-            />
-            <button
-              v-if="searchQuery"
-              type="button"
-              class="text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]"
-              aria-label="Clear search"
-              @click="searchQuery = ''"
+        <span class="hidden h-5 w-px bg-[color:var(--sf-line)] sm:block" aria-hidden="true" />
+
+        <!-- Bid / Ask / Spread Telemetry -->
+        <dl class="sf-mono flex flex-wrap items-center gap-x-4 gap-y-1 text-[11.5px]">
+          <div class="flex items-baseline gap-1.5">
+            <dt class="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+              Bid
+            </dt>
+            <dd class="text-[14px] font-bold text-[color:var(--sf-bid)]">
+              {{ zc.connected ? formatApr(pulse.bestBid) : "—" }}
+            </dd>
+          </div>
+
+          <div class="flex items-baseline gap-1.5">
+            <dt class="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+              Ask
+            </dt>
+            <dd class="text-[14px] font-bold text-[color:var(--sf-ask)]">
+              {{ zc.connected ? formatApr(pulse.bestAsk) : "—" }}
+            </dd>
+          </div>
+
+          <div class="flex items-center gap-1.5">
+            <dt class="text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+              Spd
+            </dt>
+            <dd
+              class="text-[13px] font-semibold"
+              :class="pulse.crossed ? 'text-[color:var(--sf-ask)]' : 'text-[color:var(--sf-ink)]'"
+              :title="
+                pulse.spreadD != null
+                  ? `Tightest same-maturity spread in slice (evaluated at ${formatDur(pulse.spreadD, zc.durationUnit)})`
+                  : 'Same-maturity spread (requires overlapping bid and ask)'
+              "
             >
-              <x-icon class="h-3.5 w-3.5" />
-            </button>
-          </div>
-
-          <div
-            v-if="searchFocused && searchHits.length"
-            class="sf-plate absolute inset-x-0 top-[calc(100%+6px)] z-30 overflow-hidden rounded-xl py-1"
-          >
-            <button
-              v-for="hit in searchHits"
-              :key="hit.id"
-              type="button"
-              class="flex w-full items-center justify-between gap-2 px-3 py-2 text-left text-[11.5px] hover:bg-[color:var(--sf-well)]"
-              @mousedown.prevent="pickSearchHit(hit)"
+              {{ zc.connected ? formatBp(pulse.spread) : "—" }}
+            </dd>
+            <span
+              v-if="zc.connected && pulse.refTenorBlocks != null"
+              class="sf-mono text-[10px] font-medium text-[color:var(--sf-dim)]"
+              :title="
+                pulse.spreadD != null
+                  ? `Bid, Ask, and Spread matched at ${formatDur(pulse.spreadD, zc.durationUnit)}`
+                  : `Bid curve evaluated at ${formatDur(pulse.refTenorBlocks, zc.durationUnit)}`
+              "
             >
-              <span class="sf-mono font-semibold text-[color:var(--sf-ink)]">
-                {{ shortenString(hit.id, 14) }}
-              </span>
-              <span class="sf-mono text-[10.5px] uppercase text-[color:var(--sf-muted)]">
-                {{ hit.type }} {{ hit.market || "" }}
-              </span>
-            </button>
-          </div>
-        </div>
-      </div>
-
-      <!-- Editorial Market Pulse Ribbon -->
-      <dl
-        class="sf-plate grid grid-cols-2 divide-y divide-[color:var(--sf-line)] overflow-hidden rounded-2xl sm:grid-cols-5 sm:divide-x sm:divide-y-0"
-      >
-        <div class="px-4 py-3">
-          <dt class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Best Bid
-          </dt>
-          <dd class="sf-mono mt-1 text-[19px] font-semibold text-[color:var(--sf-bid)]">
-            {{ zc.connected ? formatApr(pulse.bestBid) : "—" }}
-          </dd>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ upto ? `≤ ${formatDur(targetBlocks, zc.durationUnit)}` : `near ${formatDur(targetBlocks, zc.durationUnit)}` }}
-          </div>
-        </div>
-
-        <div class="px-4 py-3">
-          <dt class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Best Ask
-          </dt>
-          <dd class="sf-mono mt-1 text-[19px] font-semibold text-[color:var(--sf-ask)]">
-            {{ zc.connected ? formatApr(pulse.bestAsk) : "—" }}
-          </dd>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            cover ≥ {{ activeFilters.coverage }}%
-          </div>
-        </div>
-
-        <div class="px-4 py-3">
-          <dt class="sf-mono flex items-center gap-1.5 text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            <span>Spread</span>
+              @{{ formatDurCell(pulse.refTenorBlocks, zc.durationUnit) }}
+            </span>
             <span
               v-if="zc.connected && pulse.crossed"
-              class="rounded bg-[color:var(--sf-ask-soft)] px-1 py-0.5 text-[9px] font-semibold text-[color:var(--sf-ask)]"
+              class="rounded-[4px] border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] px-1.5 py-[1px] text-[9px] font-bold uppercase text-[color:var(--sf-ask)]"
             >
-              Crossed
+              Cross
             </span>
-          </dt>
-          <dd
-            class="sf-mono mt-1 text-[19px] font-semibold"
-            :class="pulse.crossed ? 'text-[color:var(--sf-ask)]' : 'text-[color:var(--sf-ink)]'"
-          >
-            {{ zc.connected ? formatBp(pulse.spread) : "—" }}
-          </dd>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ pulse.crossed ? "immediate match" : "bid − ask" }}
           </div>
-        </div>
 
-        <div class="px-4 py-3">
-          <dt class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Offer Depth
-          </dt>
-          <dd class="sf-mono mt-1 text-[19px] font-semibold text-[color:var(--sf-ink)]">
-            {{ zc.connected ? `${formatCompact(pulse.offerCap)} ${zc.activeMarket}` : "—" }}
-          </dd>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ pulse.offerCount }} offers<template v-if="pulse.offerUsd != null && pulse.offerUsd > 0">
-              · ${{ formatCompact(pulse.offerUsd) }}</template
-            >
+          <!-- Depth Balance Micro-Bar (visible on wide screens) -->
+          <div
+            class="hidden items-center gap-2 2xl:flex"
+            :title="`Offers: ${formatCompact(pulse.offerCap)} ${zc.activeMarket} (${pulse.offerCount}) · Asks: ${formatCompact(pulse.askCost)} ${zc.activeMarket} (${pulse.askCount})`"
+          >
+            <span class="h-4 w-px bg-[color:var(--sf-line)]" aria-hidden="true" />
+            <span class="text-[11px] font-semibold text-[color:var(--sf-bid)]">
+              {{ zc.connected ? formatCompact(pulse.offerCap) : "—" }}
+            </span>
+            <span class="flex h-1.5 w-14 overflow-hidden rounded-full bg-[color:var(--sf-line)]">
+              <span
+                class="h-full bg-[color:var(--sf-bid)] transition-all duration-300"
+                :style="{ width: `${pulse.bidSharePct}%` }"
+              />
+              <span
+                class="h-full bg-[color:var(--sf-ask)] transition-all duration-300"
+                :style="{ width: `${100 - pulse.bidSharePct}%` }"
+              />
+            </span>
+            <span class="text-[11px] font-semibold text-[color:var(--sf-ask)]">
+              {{ zc.connected ? formatCompact(pulse.askCost) : "—" }}
+            </span>
           </div>
-        </div>
-
-        <div class="col-span-2 px-4 py-3 sm:col-span-1">
-          <dt class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Ask Demand
-          </dt>
-          <dd class="sf-mono mt-1 text-[19px] font-semibold text-[color:var(--sf-ink)]">
-            {{ zc.connected ? `${formatCompact(pulse.askCost)} ${zc.activeMarket}` : "—" }}
-          </dd>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ pulse.askCount }} asks<template v-if="pulse.askUsd != null && pulse.askUsd > 0">
-              · ${{ formatCompact(pulse.askUsd) }}</template
-            >
-          </div>
-        </div>
-      </dl>
-    </header>
-
-    <!-- Unified Precision Control Bar -->
-    <div
-      class="sf-plate flex flex-wrap items-center gap-x-4 gap-y-2.5 rounded-2xl px-4 py-2.5 sm:px-5"
-      role="toolbar"
-      aria-label="Rate Book filters"
-    >
-      <!-- Maturity Mode + Tenor Pills -->
-      <div class="flex flex-wrap items-center gap-2">
-        <span class="sf-mono text-[10px] font-semibold uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-          Maturity
-        </span>
-        <div
-          class="inline-flex rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5 text-[11px]"
-          role="group"
-          aria-label="Maturity range mode"
-        >
-          <button
-            type="button"
-            :aria-pressed="maturityMode === 'upto'"
-            class="rounded-md px-2 py-1 font-semibold transition-all"
-            :class="
-              maturityMode === 'upto'
-                ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-                : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-            "
-            @click="maturityMode = 'upto'"
-          >
-            Up to
-          </button>
-          <button
-            type="button"
-            :aria-pressed="maturityMode === 'near'"
-            class="rounded-md px-2 py-1 font-semibold transition-all"
-            :class="
-              maturityMode === 'near'
-                ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-                : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-            "
-            @click="maturityMode = 'near'"
-          >
-            Around
-          </button>
-        </div>
-
-        <div class="flex flex-wrap items-center gap-1" role="group" aria-label="Tenor presets">
-          <button
-            v-for="d in TENORS"
-            :key="d"
-            type="button"
-            :aria-pressed="targetBlocks === d * DAY_BLOCKS"
-            class="sf-mono rounded-md border px-2 py-1 text-[11px] font-medium transition-all"
-            :class="
-              targetBlocks === d * DAY_BLOCKS
-                ? 'border-cobalt-600 bg-cobalt-50 text-cobalt-700'
-                : 'border-[color:var(--sf-line)] bg-[color:var(--sf-card)] text-[color:var(--sf-muted)] hover:border-[color:var(--sf-line-strong)] hover:text-[color:var(--sf-ink)]'
-            "
-            @click="targetBlocks = d * DAY_BLOCKS"
-          >
-            {{ chipLabel(d) }}
-          </button>
-        </div>
+        </dl>
       </div>
 
-      <span class="hidden h-5 w-px bg-[color:var(--sf-line)] lg:block" aria-hidden="true" />
+      <!-- RIGHT: Precision Filter Controls -->
+      <div class="flex flex-wrap items-center gap-2">
+        <!-- Maturity Mode + Tenor Preset Tray -->
+        <div class="flex items-center gap-1.5">
+          <div class="sf-seg" role="group" aria-label="Maturity range mode">
+            <button
+              type="button"
+              :aria-pressed="maturityMode === 'upto'"
+              title="All maturities from 1 day up to selected tenor"
+              class="sf-seg-btn px-2 py-1 text-[10.5px]"
+              :class="maturityMode === 'upto' ? 'is-active' : ''"
+              @click="maturityMode = 'upto'"
+            >
+              Up to
+            </button>
+            <button
+              type="button"
+              :aria-pressed="maturityMode === 'near'"
+              title="Orders within ±22% of selected tenor"
+              class="sf-seg-btn px-2 py-1 text-[10.5px]"
+              :class="maturityMode === 'near' ? 'is-active' : ''"
+              @click="maturityMode = 'near'"
+            >
+              Around
+            </button>
+          </div>
 
-      <!-- Cover Filter -->
-      <label class="inline-flex items-center gap-2 text-[12px] text-[color:var(--sf-muted)]">
-        <span class="sf-mono text-[10px] font-semibold uppercase tracking-[0.09em]">Cover ≥</span>
-        <select
-          v-model.number="coverage"
+          <div class="sf-seg" role="group" aria-label="Tenor presets">
+            <button
+              v-for="d in TENORS"
+              :key="d"
+              type="button"
+              :aria-pressed="targetBlocks === d * DAY_BLOCKS"
+              class="sf-seg-btn sf-mono px-2 py-1 text-[10.5px]"
+              :class="targetBlocks === d * DAY_BLOCKS ? 'is-active tone-cobalt' : ''"
+              @click="targetBlocks = d * DAY_BLOCKS"
+            >
+              {{ chipLabel(d) }}
+            </button>
+          </div>
+        </div>
+
+        <!-- Cover Filter -->
+        <zc-select
+          :model-value="coverage"
+          :options="COVER_OPTIONS"
+          prefix="Cov"
           aria-label="Minimum cover ratio"
-          class="sf-mono rounded-lg border border-[color:var(--sf-line-strong)] bg-[color:var(--sf-paper)] px-2 py-1 text-[11.5px] font-semibold text-[color:var(--sf-ink)] outline-none focus:border-cobalt-600"
-        >
-          <option v-for="c in COVERS" :key="c" :value="c">{{ c }}%</option>
-        </select>
-      </label>
+          mono
+          align="right"
+          @update:model-value="coverage = Number($event)"
+        />
 
-      <!-- Source Filter -->
-      <label class="inline-flex items-center gap-2 text-[12px] text-[color:var(--sf-muted)]">
-        <span class="sf-mono text-[10px] font-semibold uppercase tracking-[0.09em]">Source</span>
-        <select
-          v-model="kind"
+        <!-- Source Filter -->
+        <zc-select
+          :model-value="kind"
+          :options="SOURCE_OPTIONS"
           aria-label="Order source filter"
-          class="rounded-lg border border-[color:var(--sf-line-strong)] bg-[color:var(--sf-paper)] px-2.5 py-1 text-[12px] font-medium text-[color:var(--sf-ink)] outline-none focus:border-cobalt-600"
-        >
-          <option value="all">New loans + resale</option>
-          <option value="new">New loans</option>
-          <option value="resale">Resale</option>
-          <option value="shares">Shares only</option>
-        </select>
-      </label>
+          align="right"
+          @update:model-value="kind = $event as ZcSourceKind"
+        />
 
-      <!-- Matchable Only -->
-      <label class="inline-flex cursor-pointer items-center gap-1.5 text-[12px] font-medium text-[color:var(--sf-ink-2)]">
-        <input v-model="matchable" type="checkbox" class="h-3.5 w-3.5 rounded accent-cobalt-600" />
-        <span>Matchable only</span>
-      </label>
-
-      <!-- More Filters Popover -->
-      <div ref="filterMenuRef" class="relative ml-auto" @keydown.esc="filtersOpen = false">
+        <!-- Matchable Animated Toggle Pill -->
         <button
           type="button"
-          :aria-expanded="filtersOpen"
-          class="inline-flex items-center gap-1.5 rounded-lg border px-2.5 py-1.5 text-[12px] font-medium transition-colors"
+          role="switch"
+          :aria-checked="matchable"
+          title="Hide paused guards, stale oracle orders, and under-ratio bonds"
+          class="inline-flex h-8 items-center gap-2 rounded-[10px] border px-2.5 text-[11px] font-semibold transition-all active:scale-95"
           :class="
-            extraFilterCount > 0 || filtersOpen
-              ? 'border-cobalt-600/40 bg-cobalt-50 text-cobalt-700'
-              : 'border-[color:var(--sf-line-strong)] bg-[color:var(--sf-card)] text-[color:var(--sf-ink-2)] hover:bg-[color:var(--sf-well)]'
+            matchable
+              ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-ink)]'
+              : 'border-[color:var(--sf-line)] bg-[color:var(--sf-seg-bg)] text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
           "
-          @click="filtersOpen = !filtersOpen"
+          @click="matchable = !matchable"
         >
-          <filter-icon class="h-3.5 w-3.5" />
-          <span>Filters</span>
-          <span
-            v-if="extraFilterCount > 0"
-            class="sf-mono rounded bg-cobalt-600 px-1.5 py-0.2 text-[10px] font-semibold text-white"
-          >
-            {{ extraFilterCount }}
+          <span class="sf-switch-track" :class="{ 'is-on': matchable }">
+            <span class="sf-switch-thumb" />
           </span>
+          <span>Matchable</span>
         </button>
 
-        <div
-          v-if="filtersOpen"
-          class="sf-plate absolute right-0 top-[calc(100%+8px)] z-30 w-72 space-y-3 rounded-xl p-4"
-          role="dialog"
-          aria-label="Additional Rate Book filters"
-        >
-          <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
-            <input v-model="grid" type="checkbox" class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600" />
-            <span>
-              <strong class="block font-semibold text-[color:var(--sf-ink)]">Grid maturities only</strong>
-              <span class="text-[11px] text-[color:var(--sf-muted)]">
-                Fixed maturities on the 30-day zcs1 grid and matching windows.
-              </span>
-            </span>
-          </label>
-
-          <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
-            <input v-model="follow" type="checkbox" class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600" />
-            <span>
-              <strong class="block font-semibold text-[color:var(--sf-ink)]">Tables follow maturity</strong>
-              <span class="text-[11px] text-[color:var(--sf-muted)]">
-                Limit ledger tables to the active maturity slice.
-              </span>
-            </span>
-          </label>
-
-          <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
-            <input v-model="showFills" type="checkbox" class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600" />
-            <span>
-              <strong class="block font-semibold text-[color:var(--sf-ink)]">Fills on curve</strong>
-              <span class="text-[11px] text-[color:var(--sf-muted)]">
-                Overlay last 10 days of fills fading with block age.
-              </span>
-            </span>
-          </label>
-
-          <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
-            <input v-model="showOffers" type="checkbox" class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600" />
-            <span>
-              <strong class="block font-semibold text-[color:var(--sf-ink)]">Every bid curve</strong>
-              <span class="text-[11px] text-[color:var(--sf-muted)]">
-                Draw each individual lend offer curve on the yield plot.
-              </span>
-            </span>
-          </label>
-
-          <div class="flex items-center justify-between border-t border-[color:var(--sf-line)] pt-2.5">
-            <button
-              type="button"
-              class="text-[11.5px] font-medium text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]"
-              @click="resetAllFilters"
+        <!-- More Filters Popover -->
+        <div ref="filterMenuRef" class="relative" @keydown.esc="filtersOpen = false">
+          <button
+            type="button"
+            :aria-expanded="filtersOpen"
+            class="inline-flex h-8 items-center gap-1.5 rounded-[10px] border px-2.5 text-[11px] font-semibold transition-all active:scale-95"
+            :class="
+              extraFilterCount > 0 || filtersOpen
+                ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
+                : 'border-[color:var(--sf-line)] bg-[color:var(--sf-card)] text-[color:var(--sf-ink-2)] hover:border-[color:var(--sf-line-strong)]'
+            "
+            @click="filtersOpen = !filtersOpen"
+          >
+            <filter-icon class="h-3.5 w-3.5" />
+            <span class="hidden sm:inline">More</span>
+            <span
+              v-if="extraFilterCount > 0"
+              class="sf-mono rounded-[4px] bg-[color:var(--sf-cobalt)] px-1.5 py-[1px] text-[9.5px] font-bold text-white"
             >
-              Reset all
-            </button>
-            <button
-              type="button"
-              class="sf-btn-outline rounded-lg px-3 py-1 text-[11.5px]"
-              @click="filtersOpen = false"
+              {{ extraFilterCount }}
+            </span>
+          </button>
+
+          <transition name="sf-pop">
+            <div
+              v-if="filtersOpen"
+              class="sf-popover absolute right-0 top-[calc(100%+8px)] z-40 w-72 space-y-3 rounded-2xl p-4"
+              role="dialog"
+              aria-label="Additional Yield Curve filters"
             >
-              Done
-            </button>
-          </div>
+              <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
+                <input
+                  v-model="grid"
+                  type="checkbox"
+                  class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600"
+                />
+                <span>
+                  <strong class="block font-semibold text-[color:var(--sf-ink)]">
+                    Grid maturities only
+                  </strong>
+                  <span class="text-[11px] text-[color:var(--sf-muted)]">
+                    30-day zcs1 grid heights and matching windows.
+                  </span>
+                </span>
+              </label>
+
+              <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
+                <input
+                  v-model="follow"
+                  type="checkbox"
+                  class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600"
+                />
+                <span>
+                  <strong class="block font-semibold text-[color:var(--sf-ink)]">
+                    Tables follow maturity
+                  </strong>
+                  <span class="text-[11px] text-[color:var(--sf-muted)]">
+                    Filter ledger to active maturity slice.
+                  </span>
+                </span>
+              </label>
+
+              <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
+                <input
+                  v-model="showFills"
+                  type="checkbox"
+                  class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600"
+                />
+                <span>
+                  <strong class="block font-semibold text-[color:var(--sf-ink)]">
+                    Fills on curve
+                  </strong>
+                  <span class="text-[11px] text-[color:var(--sf-muted)]">
+                    10-day executions fading with age.
+                  </span>
+                </span>
+              </label>
+
+              <label class="flex cursor-pointer items-start gap-2.5 text-[12px]">
+                <input
+                  v-model="showOffers"
+                  type="checkbox"
+                  class="mt-0.5 h-3.5 w-3.5 rounded accent-cobalt-600"
+                />
+                <span>
+                  <strong class="block font-semibold text-[color:var(--sf-ink)]">
+                    Every bid curve
+                  </strong>
+                  <span class="text-[11px] text-[color:var(--sf-muted)]">
+                    Draw each individual lend offer curve.
+                  </span>
+                </span>
+              </label>
+
+              <div
+                class="flex items-center justify-between border-t border-[color:var(--sf-line)] pt-2.5"
+              >
+                <button
+                  type="button"
+                  class="text-[11.5px] font-medium text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]"
+                  @click="resetAllFilters"
+                >
+                  Reset all
+                </button>
+                <button
+                  type="button"
+                  class="sf-btn-outline rounded-full px-3.5 py-1 text-[11.5px]"
+                  @click="filtersOpen = false"
+                >
+                  Done
+                </button>
+              </div>
+            </div>
+          </transition>
         </div>
       </div>
-    </div>
+    </section>
 
-    <!-- Primary 12-Column Quantitative Workbench -->
-    <div class="grid grid-cols-1 gap-5 lg:grid-cols-12">
-      <!-- Centerpiece 4-Lens Visual Stage -->
-      <div class="lg:col-span-12 xl:col-span-6">
-        <rate-book-canvas
-          :market="zc.activeMarket"
-          :curves="curves"
-          :asks="asksState.items"
-          :offers="offersState.items"
+    <!-- ========================================================
+         MAIN 3-COLUMN SINGLE-SCREEN TRADING WORKBENCH
+         ======================================================== -->
+    <div
+      class="grid min-h-0 flex-1 grid-cols-1 gap-3 lg:grid-cols-12 xl:grid-cols-[minmax(0,1fr)_280px_332px] 2xl:grid-cols-[minmax(0,1fr)_304px_348px]"
+    >
+      <!-- COLUMN 1 (Left): Analytical Stage (Top) + Live Depth Ledger (Bottom) -->
+      <div class="flex min-h-0 min-w-0 flex-col gap-3 lg:col-span-12 xl:col-span-1">
+        <div class="min-h-[300px] xl:min-h-0 xl:flex-[55_1_0%]">
+          <rate-book-canvas
+            :market="zc.activeMarket"
+            :curves="curves"
+            :orderbook="orderbook"
+            :asks="asksState.items"
+            :offers="offersState.items"
+            :fills="fillsState.items"
+            :fills-status="fillsState.status"
+            :height="zc.height"
+            :connected="zc.connected"
+            :oracle-refreshing="refreshing"
+            :unit="zc.durationUnit"
+            :target-blocks="targetBlocks"
+            :upto="upto"
+            :coverage="activeFilters.coverage"
+            :show-fills="showFills"
+            :show-offers="showOffers"
+            :selected-id="selected?.id ?? null"
+            @update:target-blocks="targetBlocks = $event"
+            @update:show-fills="showFills = $event"
+            @update:show-offers="showOffers = $event"
+            @select-ask="selectAsk"
+            @select-bid="selectBid"
+          />
+        </div>
+
+        <div class="min-h-[260px] xl:min-h-0 xl:flex-[45_1_0%]">
+          <order-ledger-table
+            :tab="ledgerTab"
+            :sort="sort"
+            :market="zc.activeMarket"
+            :unit="zc.durationUnit"
+            :height="zc.height"
+            :follow="follow"
+            :asks="asksState.items"
+            :asks-total="asksState.total"
+            :asks-next="asksState.next"
+            :asks-pending-hidden="asksState.pendingHidden"
+            :asks-loading="asksState.loading"
+            :offers="offersState.items"
+            :offers-total="offersState.total"
+            :offers-next="offersState.next"
+            :offers-pending-hidden="offersState.pendingHidden"
+            :offers-loading="offersState.loading"
+            :fills="fillsState.items"
+            :fills-status="fillsState.status"
+            :selected-id="selected?.id ?? null"
+            :search-query="zc.searchQuery"
+            @update:tab="ledgerTab = $event"
+            @update:sort="sort = $event"
+            @select-ask="selectAsk"
+            @select-bid="selectBid"
+            @quick-fund="handleQuickFund"
+            @load-more-asks="loadMoreAsks"
+            @load-more-offers="loadMoreOffers"
+          />
+        </div>
+      </div>
+
+      <!-- COLUMN 2 (Center): Full-Height Synchronized Order Ladder + Tape -->
+      <div class="min-h-0 lg:col-span-6 xl:col-span-1">
+        <order-ladder-panel
+          :book="orderbook"
           :fills="fillsState.items"
           :fills-status="fillsState.status"
           :height="zc.height"
-          :connected="zc.connected"
-          :oracle-refreshing="refreshing"
-          :unit="zc.durationUnit"
-          :target-blocks="targetBlocks"
-          :upto="upto"
-          :coverage="activeFilters.coverage"
-          :show-fills="showFills"
-          :show-offers="showOffers"
-          :selected-id="selected?.id ?? null"
-          @update:target-blocks="targetBlocks = $event"
-          @update:show-fills="showFills = $event"
-          @update:show-offers="showOffers = $event"
-          @select-ask="selectAsk"
-          @select-bid="selectBid"
-        />
-      </div>
-
-      <!-- Synchronized Spread Ladder -->
-      <div class="lg:col-span-6 xl:col-span-3">
-        <order-ladder-panel
-          :book="orderbook"
           :market="zc.activeMarket"
           :unit="zc.durationUnit"
           :upto="upto"
@@ -966,106 +1078,82 @@ const pulse = computed(() => {
         />
       </div>
 
-      <!-- Contextual Inspector / Order Ticket -->
-      <div class="lg:col-span-6 xl:col-span-3">
-        <ask-inspector
-          v-if="selectedAsk"
-          :key="selectedAsk.id"
-          :ask="selectedAsk"
-          :curves="curves"
-          :height="zc.height"
-          :oracle-price="zc.oracle.price"
-          :oracle-age="zc.oracle.age"
-          :unit="zc.durationUnit"
-          @close="selected = null"
-          @preview="previewPayload = $event"
-        />
-        <offer-inspector
-          v-else-if="selectedOffer"
-          :key="selectedOffer.id"
-          :offer="selectedOffer"
-          :height="zc.height"
-          :target-blocks="targetBlocks"
-          :upto="upto"
-          :unit="zc.durationUnit"
-          :connected="zc.connected"
-          :revision="zc.revision"
-          @close="selected = null"
-          @borrow-against="handleBorrowAgainstOffer"
-        />
-        <order-ticket-panel
-          v-else
-          :market="zc.activeMarket"
-          :curves="curves"
-          :filters="activeFilters"
-          :height="zc.height"
-          :oracle-price="zc.oracle.price"
-          :oracle-refreshing="refreshing"
-          :connected="zc.connected"
-          :revision="zc.revision"
-          :unit="zc.durationUnit"
-          :prefill="ticketPrefill"
-          @preview="previewPayload = $event"
-        />
+      <!-- COLUMN 3 (Right): Full-Height Elevated Action & Inspector Dock -->
+      <div class="min-h-0 lg:col-span-6 xl:col-span-1">
+        <transition name="sf-swap" mode="out-in">
+          <ask-inspector
+            v-if="selectedAsk"
+            :key="`ask-${selectedAsk.id}`"
+            :ask="selectedAsk"
+            :curves="curves"
+            :height="zc.height"
+            :oracle-price="zc.oracle.price"
+            :oracle-age="zc.oracle.age"
+            :unit="zc.durationUnit"
+            @close="selected = null"
+            @preview="previewPayload = $event"
+          />
+          <offer-inspector
+            v-else-if="selectedOffer"
+            :key="`offer-${selectedOffer.id}`"
+            :offer="selectedOffer"
+            :height="zc.height"
+            :target-blocks="targetBlocks"
+            :upto="upto"
+            :unit="zc.durationUnit"
+            :connected="zc.connected"
+            :revision="zc.revision"
+            @close="selected = null"
+            @borrow-against="handleBorrowAgainstOffer"
+            @sell-against="handleSellAgainstOffer"
+          />
+          <order-ticket-panel
+            v-else
+            key="ticket"
+            :market="zc.activeMarket"
+            :curves="curves"
+            :filters="activeFilters"
+            :height="zc.height"
+            :oracle-price="zc.oracle.price"
+            :oracle-refreshing="refreshing"
+            :connected="zc.connected"
+            :revision="zc.revision"
+            :unit="zc.durationUnit"
+            :prefill="ticketPrefill"
+            @preview="previewPayload = $event"
+          />
+        </transition>
       </div>
     </div>
 
-    <!-- Full Depth Order Ledger -->
-    <order-ledger-table
-      :tab="ledgerTab"
-      :sort="sort"
-      :market="zc.activeMarket"
-      :unit="zc.durationUnit"
-      :height="zc.height"
-      :follow="follow"
-      :asks="asksState.items"
-      :asks-total="asksState.total"
-      :asks-next="asksState.next"
-      :asks-pending-hidden="asksState.pendingHidden"
-      :asks-loading="asksState.loading"
-      :offers="offersState.items"
-      :offers-total="offersState.total"
-      :offers-next="offersState.next"
-      :offers-pending-hidden="offersState.pendingHidden"
-      :offers-loading="offersState.loading"
-      :fills="fillsState.items"
-      :fills-status="fillsState.status"
-      :selected-id="selected?.id ?? null"
-      :search-query="searchQuery"
-      @update:tab="ledgerTab = $event"
-      @update:sort="sort = $event"
-      @select-ask="selectAsk"
-      @select-bid="selectBid"
-      @load-more-asks="loadMoreAsks"
-      @load-more-offers="loadMoreOffers"
-    />
-
     <!-- Structured Execution Preview Modal -->
-    <execution-preview-modal
-      v-if="previewPayload"
-      :payload="previewPayload"
-      @close="previewPayload = null"
-    />
+    <transition name="sf-modal">
+      <execution-preview-modal
+        v-if="previewPayload"
+        :payload="previewPayload"
+        @close="previewPayload = null"
+      />
+    </transition>
   </div>
 
   <!-- ========================================================
-       AUCTIONS WORKSPACE (/app/auctions)
+       AUCTIONS WORKSPACE (/app/auctions) — Placeholder for Next Slice
        ======================================================== -->
   <div v-else-if="section === 'auctions'" class="space-y-6">
     <div>
-      <h1 class="sf-serif text-[32px] font-semibold text-[color:var(--sf-ink)]">Auctions</h1>
+      <h1 class="sf-display text-[30px] font-bold text-[color:var(--sf-ink)]">Auctions</h1>
       <p class="mt-1 text-[13px] text-[color:var(--sf-muted)]">
         Linear falling-price Dutch sale lots and post-liquidation share vault auctions.
       </p>
     </div>
 
     <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
-      <section class="sf-plate rounded-2xl p-6">
+      <section class="sf-terminal-plate rounded-[20px] rounded-tl-[6px] p-6">
         <div class="flex items-center justify-between border-b border-[color:var(--sf-line)] pb-3.5">
-          <h2 class="sf-serif text-[19px] font-semibold">Sale Auctions</h2>
-          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">{{
-            zc.lots.length
-          }}</span>
+          <h2 class="sf-display text-[18px] font-semibold">Sale Auctions</h2>
+          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">
+            {{ zc.lots.length }}
+          </span>
         </div>
         <div v-if="zc.lots.length" class="divide-y divide-[color:var(--sf-line)]">
           <div
@@ -1091,12 +1179,12 @@ const pulse = computed(() => {
         </div>
       </section>
 
-      <section class="sf-plate rounded-2xl p-6">
+      <section class="sf-terminal-plate rounded-[20px] rounded-tr-[6px] p-6">
         <div class="flex items-center justify-between border-b border-[color:var(--sf-line)] pb-3.5">
-          <h2 class="sf-serif text-[19px] font-semibold">Liquidation Auctions</h2>
-          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">{{
-            zc.vaults.length
-          }}</span>
+          <h2 class="sf-display text-[18px] font-semibold">Liquidation Auctions</h2>
+          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">
+            {{ zc.vaults.length }}
+          </span>
         </div>
         <div v-if="zc.vaults.length" class="divide-y divide-[color:var(--sf-line)]">
           <div
@@ -1125,17 +1213,17 @@ const pulse = computed(() => {
   </div>
 
   <!-- ========================================================
-       PORTFOLIO WORKSPACE (/app/portfolio)
+       PORTFOLIO WORKSPACE (/app/portfolio) — Placeholder for Next Slice
        ======================================================== -->
   <div v-else class="space-y-6">
     <div>
-      <h1 class="sf-serif text-[32px] font-semibold text-[color:var(--sf-ink)]">Portfolio</h1>
+      <h1 class="sf-display text-[30px] font-bold text-[color:var(--sf-ink)]">Portfolio</h1>
       <p class="mt-1 text-[13px] text-[color:var(--sf-muted)]">
         Track active ZC lending positions, collateralized loans, open orders, and custody wraps.
       </p>
     </div>
-    <div class="sf-plate rounded-2xl p-8 text-[14px] text-[color:var(--sf-muted)]">
-      Connect Nautilus to view ZC positions and open orders once v2→v3 wallet indexing is enabled.
+    <div class="sf-terminal-plate rounded-[20px] p-8 text-[14px] text-[color:var(--sf-muted)]">
+      Connect Nautilus to view your on-chain ZC positions and open orders.
     </div>
   </div>
 </template>

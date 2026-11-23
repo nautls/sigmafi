@@ -2,6 +2,7 @@
 import { computed } from "vue";
 import CoverMeter from "./CoverMeter.vue";
 import MiniCurveSpark from "./MiniCurveSpark.vue";
+import ZcOrderMark from "./ZcOrderMark.vue";
 import {
   ZcAskSummary,
   ZcDurationUnit,
@@ -55,6 +56,7 @@ const emit = defineEmits<{
   (e: "update:sort", v: ZcSortKey): void;
   (e: "select-ask", id: string): void;
   (e: "select-bid", id: string): void;
+  (e: "quick-fund", ask: ZcAskSummary): void;
   (e: "load-more-asks"): void;
   (e: "load-more-offers"): void;
 }>();
@@ -97,102 +99,85 @@ function askQuoteFor(a: ZcAskSummary) {
 }
 
 function askSparkPts(a: ZcAskSummary) {
-  return askPath(a, props.height, 16);
+  return askPath(a, props.height, 14);
 }
 
 function isUsable(x: { ok: boolean; status?: string; reasons?: string[] }) {
   return x.ok || isOracleRefreshingOnly(x);
 }
+
+function isBuyback(a: ZcAskSummary) {
+  return !!a.borrowedByMe && a.kind !== "order" && !a.owner;
+}
 </script>
 
 <template>
-  <section class="sf-plate overflow-hidden rounded-2xl">
-    <!-- Ledger Header Bar -->
-    <div
-      class="flex flex-wrap items-center justify-between gap-3 border-b border-[color:var(--sf-line)] px-4 py-3 sm:px-5"
-    >
-      <div class="flex flex-wrap items-center gap-2.5">
-        <div
-          class="inline-flex rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5 text-[12px]"
-          role="tablist"
-          aria-label="Order Ledger side"
-        >
+  <section
+    class="sf-terminal-plate ledger-shell flex h-full min-h-[220px] flex-col overflow-hidden rounded-[20px] rounded-bl-[6px] xl:min-h-0"
+    :data-side="tab"
+  >
+    <!-- Header Bar -->
+    <div class="sf-panel-head flex shrink-0 flex-wrap items-center justify-between gap-2 px-3.5 py-2">
+      <div class="flex flex-wrap items-center gap-2">
+        <div class="sf-seg" role="tablist" aria-label="Order Ledger side">
           <button
             type="button"
             role="tab"
             :aria-selected="tab === 'asks'"
-            class="rounded-md px-3 py-1 font-semibold transition-all"
-            :class="
-              tab === 'asks'
-                ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ask)] shadow-sm ring-1 ring-slate-900/10'
-                : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-            "
+            class="sf-seg-btn px-2.5 py-1 text-[11.5px]"
+            :class="tab === 'asks' ? 'is-active tone-ask' : ''"
             @click="emit('update:tab', 'asks')"
           >
-            Asks <span class="sf-mono ml-1 opacity-80">{{ asksTotal }}</span>
+            <span>Asks</span>
+            <span class="sf-mono text-[10.5px] opacity-80">{{ asksTotal }}</span>
           </button>
           <button
             type="button"
             role="tab"
             :aria-selected="tab === 'bids'"
-            class="rounded-md px-3 py-1 font-semibold transition-all"
-            :class="
-              tab === 'bids'
-                ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-bid)] shadow-sm ring-1 ring-slate-900/10'
-                : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-            "
+            class="sf-seg-btn px-2.5 py-1 text-[11.5px]"
+            :class="tab === 'bids' ? 'is-active tone-bid' : ''"
             @click="emit('update:tab', 'bids')"
           >
-            Lend Offers <span class="sf-mono ml-1 opacity-80">{{ offersTotal }}</span>
+            <span>Offers</span>
+            <span class="sf-mono text-[10.5px] opacity-80">{{ offersTotal }}</span>
           </button>
           <button
             type="button"
             role="tab"
             :aria-selected="tab === 'fills'"
-            class="rounded-md px-3 py-1 font-semibold transition-all"
-            :class="
-              tab === 'fills'
-                ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-                : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-            "
+            class="sf-seg-btn px-2.5 py-1 text-[11.5px]"
+            :class="tab === 'fills' ? 'is-active tone-cobalt' : ''"
             @click="emit('update:tab', 'fills')"
           >
-            Fills <span class="sf-mono ml-1 opacity-80">{{ fills.length }}</span>
+            <span>Fills</span>
+            <span class="sf-mono text-[10.5px] opacity-80">{{ fills.length }}</span>
           </button>
         </div>
 
         <span
           v-if="follow && tab !== 'fills'"
-          class="sf-mono rounded-md bg-cobalt-50 px-2 py-0.5 text-[10.5px] font-semibold text-cobalt-700 ring-1 ring-cobalt-600/20"
+          class="sf-mono rounded-[5px] border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
         >
-          Following maturity
+          Following slice
         </span>
 
         <span
           v-if="(tab === 'asks' && asksPendingHidden > 0) || (tab === 'bids' && offersPendingHidden > 0)"
-          class="sf-mono rounded-md bg-[color:var(--sf-ask-soft)] px-2 py-0.5 text-[10.5px] font-medium text-[color:var(--sf-ask)]"
+          class="sf-mono rounded-[5px] bg-[color:var(--sf-ask-soft)] px-2 py-0.5 text-[10px] font-medium text-[color:var(--sf-ask)]"
         >
-          +{{ tab === "asks" ? asksPendingHidden : offersPendingHidden }} pending hidden
+          +{{ tab === "asks" ? asksPendingHidden : offersPendingHidden }} pending
         </span>
       </div>
 
       <!-- Sort Controls -->
-      <div
-        v-if="tab !== 'fills'"
-        class="inline-flex items-center rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5 text-[11.5px]"
-        role="group"
-        aria-label="Sort rows"
-      >
+      <div v-if="tab !== 'fills'" class="sf-seg" role="group" aria-label="Sort rows">
         <button
           v-for="sKey in (['apr', 'maturity', 'size'] as ZcSortKey[])"
           :key="sKey"
           type="button"
-          class="sf-mono rounded-md px-2.5 py-1 font-medium capitalize transition-all"
-          :class="
-            sort === sKey
-              ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-              : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-          "
+          class="sf-seg-btn sf-mono px-2 py-1 text-[10.5px] capitalize"
+          :class="sort === sKey ? 'is-active' : ''"
           @click="emit('update:sort', sKey)"
         >
           {{ sKey === "apr" ? "APR" : sKey }}
@@ -201,116 +186,109 @@ function isUsable(x: { ok: boolean; status?: string; reasons?: string[] }) {
     </div>
 
     <!-- ASKS TABLE -->
-    <div v-if="tab === 'asks'" class="sf-scroll max-h-[460px] overflow-auto">
-      <table v-if="filteredAsks.length" class="w-full min-w-[720px] border-collapse text-left">
-        <thead
-          class="sticky top-0 z-10 border-b border-[color:var(--sf-line)] bg-[color:var(--sf-paper)]"
-        >
-          <tr class="sf-mono text-[10px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-            <th class="px-4 py-2.5 font-medium sm:px-5">Listing</th>
-            <th class="px-3 py-2.5 text-right font-medium">APR now</th>
-            <th class="px-3 py-2.5 font-medium">Trajectory</th>
-            <th class="px-3 py-2.5 text-right font-medium">Par P/F</th>
-            <th class="px-3 py-2.5 text-right font-medium">Size</th>
-            <th class="px-3 py-2.5 text-right font-medium">
-              {{ unit === "blocks" ? "Matures · blk" : "Matures" }}
+    <div v-if="tab === 'asks'" class="sf-scroll sf-dock-well min-h-0 flex-1 overflow-auto">
+      <table v-if="filteredAsks.length" class="w-full min-w-[540px] border-collapse text-left">
+        <thead class="ledger-thead sticky top-0 z-10 bg-[color:var(--sf-card)]">
+          <tr class="sf-mono text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+            <th class="px-3.5 py-2">Listing</th>
+            <th class="px-2.5 py-2 text-right">APR</th>
+            <th class="hidden px-2.5 py-2 sm:table-cell">Path</th>
+            <th class="hidden px-2.5 py-2 text-right 2xl:table-cell">Par</th>
+            <th class="px-2.5 py-2 text-right">Size</th>
+            <th class="px-2.5 py-2 text-right">
+              {{ unit === "blocks" ? "Blk" : "Matures" }}
             </th>
-            <th class="px-3 py-2.5 font-medium">Cover</th>
-            <th class="px-4 py-2.5 text-right font-medium sm:px-5">Status</th>
+            <th class="px-2.5 py-2">Cover</th>
+            <th class="px-3.5 py-2 text-right" />
           </tr>
         </thead>
 
-        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12.5px]">
+        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12px]">
           <tr
             v-for="ask in filteredAsks"
             :key="ask.id"
-            class="cursor-pointer transition-colors"
+            class="ledger-row cursor-pointer"
             :class="[
-              selectedId === ask.id
-                ? 'bg-cobalt-50/70'
-                : 'hover:bg-[color:var(--sf-well)]',
-              isUsable(ask) ? '' : 'opacity-60'
+              selectedId === ask.id ? 'is-selected' : '',
+              isUsable(ask) ? '' : 'opacity-55'
             ]"
             @click="emit('select-ask', ask.id)"
           >
-            <td class="px-4 py-3 sm:px-5">
+            <td class="px-3.5 py-2">
               <div class="flex items-center gap-2.5">
-                <span
-                  class="sf-mono grid h-7 w-7 shrink-0 place-items-center rounded-lg border text-[10px] font-bold uppercase"
-                  :class="
-                    ask.kind === 'order'
-                      ? 'border-[color:var(--sf-ask)]/30 bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
-                      : ask.kind === 'shares'
-                        ? 'border-[color:var(--sf-bid)]/30 bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
-                        : 'border-cobalt-600/25 bg-cobalt-50 text-cobalt-700'
-                  "
-                >
-                  {{ ask.kind === "order" ? "LN" : ask.kind === "shares" ? "SH" : "BD" }}
-                </span>
-                <div>
-                  <div class="flex items-center gap-1.5 font-medium text-[color:var(--sf-ink)]">
-                    <span>{{ kindLabel(ask.kind) }}</span>
-                    <span class="sf-mono text-[11px] text-[color:var(--sf-dim)]">
-                      {{ shortenString(ask.id, 10) }}
+                <zc-order-mark :kind="ask.kind" :size="28" />
+                <div class="min-w-0">
+                  <div class="flex items-center gap-1.5 leading-tight">
+                    <span class="font-medium text-[color:var(--sf-ink)]">
+                      {{ kindLabel(ask.kind) }}
+                    </span>
+                    <span class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
+                      {{ shortenString(ask.id, 8) }}
+                    </span>
+                    <span
+                      v-if="isBuyback(ask)"
+                      class="sf-mono rounded-[4px] bg-[color:var(--sf-bid-soft)] px-1.5 py-[1px] text-[9px] font-semibold text-[color:var(--sf-bid)]"
+                    >
+                      Your loan
                     </span>
                   </div>
-                  <div class="text-[11px] text-[color:var(--sf-muted)]">
+                  <div class="truncate text-[10.5px] text-[color:var(--sf-muted)]">
                     {{ pricingName(ask) }}{{ ask.pending ? " · pending" : "" }}
                   </div>
                 </div>
               </div>
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right font-semibold text-[color:var(--sf-ask)]">
-              {{ formatApr(askQuoteFor(ask)?.yieldBps) }}
+            <td class="sf-mono px-2.5 py-2 text-right font-semibold text-[color:var(--sf-ask)]">
+              <span>{{ formatApr(askQuoteFor(ask)?.yieldBps) }}</span>
               <span
                 v-if="ask.pricing === 'window'"
-                class="block text-[9.5px] font-normal text-[color:var(--sf-dim)]"
+                class="ml-1 text-[9px] font-normal text-[color:var(--sf-dim)]"
               >
-                peak
+                max
               </span>
             </td>
 
-            <td class="px-3 py-3">
+            <td class="hidden px-2.5 py-2 sm:table-cell">
               <mini-curve-spark
                 :points="askSparkPts(ask)"
                 color="var(--sf-ask)"
-                :width="64"
-                :height="22"
+                :width="56"
+                :height="19"
                 :title="
                   ask.pricing === 'window'
                     ? 'APR by chosen maturity'
-                    : 'Projected APR trajectory until expiry'
+                    : 'Projected APR until expiry'
                 "
               />
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono hidden px-2.5 py-2 text-right text-[color:var(--sf-ink-2)] 2xl:table-cell">
               {{ askQuoteFor(ask) ? `${askQuoteFor(ask)!.pct.toFixed(2)}%` : "—" }}
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right font-medium text-[color:var(--sf-ink)]">
+            <td class="sf-mono px-2.5 py-2 text-right font-medium text-[color:var(--sf-ink)]">
               {{ askQuoteFor(ask) ? formatMarketAmount(askQuoteFor(ask)!.cost, ask.market) : "—" }}
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink-2)]">
               <template v-if="ask.pricing === 'window' && ask.window">
                 {{ formatDurCell(ask.window.min, unit) }}–{{ formatDurCell(ask.window.max, unit) }}
               </template>
               <template v-else-if="ask.mode === 'term'">
                 {{ formatDurCell(askQuoteFor(ask)?.d ?? ask.duration, unit) }}
-                <span class="block text-[10px] text-[color:var(--sf-dim)]">from fill</span>
+                <span class="text-[9.5px] text-[color:var(--sf-dim)]"> fill</span>
               </template>
               <template v-else-if="askQuoteFor(ask)">
                 <span>{{ dateAtHeight(height + askQuoteFor(ask)!.d, height) }}</span>
-                <span class="block text-[10px] text-[color:var(--sf-dim)]">
-                  {{ formatDur(askQuoteFor(ask)!.d, unit) }}
+                <span class="ml-1 text-[10px] text-[color:var(--sf-dim)]">
+                  {{ formatDurCell(askQuoteFor(ask)!.d, unit) }}
                 </span>
               </template>
               <template v-else>—</template>
             </td>
 
-            <td class="px-3 py-3">
+            <td class="px-2.5 py-2">
               <cover-meter
                 :value="ask.cov"
                 :ratio="ask.ratio"
@@ -319,127 +297,132 @@ function isUsable(x: { ok: boolean; status?: string; reasons?: string[] }) {
               />
             </td>
 
-            <td class="px-4 py-3 text-right sm:px-5">
+            <td class="px-3.5 py-2 text-right">
               <span
-                class="sf-mono inline-block rounded-md px-2 py-0.5 text-[10.5px] font-semibold"
-                :class="
-                  ask.owner
-                    ? 'bg-cobalt-50 text-cobalt-700'
-                    : isUsable(ask)
-                      ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
-                      : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
-                "
+                v-if="ask.owner"
+                class="sf-mono inline-block rounded-[5px] bg-[color:var(--sf-cobalt-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
               >
-                {{ ask.owner ? "Yours" : isUsable(ask) ? "Inspect" : ask.reason || "Paused" }}
+                Yours
+              </span>
+              <button
+                v-else-if="isUsable(ask)"
+                type="button"
+                class="sf-mono inline-flex h-6 items-center rounded-[6px] border px-2.5 text-[10.5px] font-semibold transition-all active:scale-95"
+                :class="
+                  isBuyback(ask)
+                    ? 'border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)] hover:brightness-110'
+                    : 'border-[color:var(--sf-line-strong)] bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] hover:border-[color:var(--sf-line-cobalt)] hover:text-[color:var(--sf-cobalt)]'
+                "
+                @click.stop="emit('quick-fund', ask)"
+              >
+                {{ ask.kind === "order" ? "Fund" : isBuyback(ask) ? "Buy back" : "Buy" }}
+              </button>
+              <span
+                v-else
+                class="sf-mono inline-block rounded-[5px] bg-[color:var(--sf-ask-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-ask)]"
+              >
+                {{ ask.reason || "Paused" }}
               </span>
             </td>
           </tr>
         </tbody>
       </table>
 
-      <div v-else class="px-6 py-12 text-center text-[13px] text-[color:var(--sf-muted)]">
-        {{ qLower ? `No asks matching "${searchQuery}".` : `No open ${market} asks match the active filters.` }}
+      <div v-else class="flex h-full min-h-[140px] items-center justify-center px-6 text-[12px] text-[color:var(--sf-muted)]">
+        {{ qLower ? `No asks matching "${searchQuery}".` : `No open ${market} asks.` }}
       </div>
 
       <div
         v-if="asksNext"
-        class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] px-4 py-3 text-center"
+        class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-2 text-center"
       >
         <button
           type="button"
           :disabled="asksLoading"
-          class="sf-btn-outline rounded-lg px-4 py-1.5 text-[12px]"
+          class="sf-btn-outline rounded-full px-4 py-1 text-[11.5px]"
           @click="emit('load-more-asks')"
         >
-          {{ asksLoading ? "Loading…" : "Load more asks" }}
+          {{ asksLoading ? "Loading…" : "Load more" }}
         </button>
       </div>
     </div>
 
     <!-- OFFERS (BIDS) TABLE -->
-    <div v-else-if="tab === 'bids'" class="sf-scroll max-h-[460px] overflow-auto">
-      <table v-if="filteredOffers.length" class="w-full min-w-[680px] border-collapse text-left">
-        <thead
-          class="sticky top-0 z-10 border-b border-[color:var(--sf-line)] bg-[color:var(--sf-paper)]"
-        >
-          <tr class="sf-mono text-[10px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-            <th class="px-4 py-2.5 font-medium sm:px-5">Lend Offer</th>
-            <th class="px-3 py-2.5 text-right font-medium">Min APR</th>
-            <th class="px-3 py-2.5 font-medium">Curve</th>
-            <th class="px-3 py-2.5 text-right font-medium">Capital</th>
-            <th class="px-3 py-2.5 text-right font-medium">
-              {{ unit === "blocks" ? "Maturities · blk" : "Maturities" }}
+    <div v-else-if="tab === 'bids'" class="sf-scroll sf-dock-well min-h-0 flex-1 overflow-auto">
+      <table v-if="filteredOffers.length" class="w-full min-w-[520px] border-collapse text-left">
+        <thead class="ledger-thead sticky top-0 z-10 bg-[color:var(--sf-card)]">
+          <tr class="sf-mono text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+            <th class="px-3.5 py-2">Offer</th>
+            <th class="px-2.5 py-2 text-right">Min APR</th>
+            <th class="hidden px-2.5 py-2 sm:table-cell">Curve</th>
+            <th class="px-2.5 py-2 text-right">Capital</th>
+            <th class="px-2.5 py-2 text-right">
+              {{ unit === "blocks" ? "Blk" : "Maturities" }}
             </th>
-            <th class="px-3 py-2.5 text-right font-medium">Cover floor</th>
-            <th class="px-4 py-2.5 text-right font-medium sm:px-5">Status</th>
+            <th class="px-2.5 py-2 text-right">Floor</th>
+            <th class="px-3.5 py-2 text-right">Status</th>
           </tr>
         </thead>
 
-        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12.5px]">
+        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12px]">
           <tr
             v-for="offer in filteredOffers"
             :key="offer.id"
-            class="cursor-pointer transition-colors"
+            class="ledger-row cursor-pointer"
             :class="[
-              selectedId === offer.id
-                ? 'bg-cobalt-50/70'
-                : 'hover:bg-[color:var(--sf-well)]',
-              isUsable(offer) ? '' : 'opacity-60'
+              selectedId === offer.id ? 'is-selected' : '',
+              isUsable(offer) ? '' : 'opacity-55'
             ]"
             @click="emit('select-bid', offer.id)"
           >
-            <td class="px-4 py-3 sm:px-5">
+            <td class="px-3.5 py-2">
               <div class="flex items-center gap-2.5">
-                <span
-                  class="sf-mono grid h-7 w-7 shrink-0 place-items-center rounded-lg border border-[color:var(--sf-bid)]/30 bg-[color:var(--sf-bid-soft)] text-[10px] font-bold text-[color:var(--sf-bid)]"
-                >
-                  LO
-                </span>
+                <zc-order-mark kind="offer" :size="26" :market="offer.market" />
                 <div>
-                  <div class="sf-mono font-medium text-[color:var(--sf-ink)]">
-                    {{ shortenString(offer.id, 12) }}
+                  <div class="sf-mono font-medium leading-tight text-[color:var(--sf-ink)]">
+                    {{ shortenString(offer.id, 10) }}
                   </div>
-                  <div class="text-[11px] text-[color:var(--sf-muted)]">
-                    {{ offer.delivery === "unit" ? "Bond units" : `Into ${offer.delivery} shares` }}
-                    · {{ offer.points.length }} pts{{ offer.pending ? " · pending" : "" }}
+                  <div class="text-[10.5px] text-[color:var(--sf-muted)]">
+                    {{ offer.delivery === "unit" ? "Units" : `${offer.delivery} shares` }} ·
+                    {{ offer.points.length }} pts{{ offer.pending ? " · pending" : "" }}
                   </div>
                 </div>
               </div>
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right font-semibold text-[color:var(--sf-bid)]">
+            <td class="sf-mono px-2.5 py-2 text-right font-semibold text-[color:var(--sf-bid)]">
               {{ formatApr(offer.minYieldBps) }}
             </td>
 
-            <td class="px-3 py-3">
+            <td class="hidden px-2.5 py-2 sm:table-cell">
               <mini-curve-spark
                 :points="offer.points"
                 color="var(--sf-bid)"
-                :width="68"
-                :height="22"
+                :width="60"
+                :height="19"
                 fill
-                :title="`Rolling yield curve (${offer.points.length} points)`"
+                :title="`Rolling curve (${offer.points.length} pts)`"
               />
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right font-medium text-[color:var(--sf-ink)]">
+            <td class="sf-mono px-2.5 py-2 text-right font-medium text-[color:var(--sf-ink)]">
               {{ formatMarketAmount(offer.capital, offer.market) }}
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink-2)]">
               {{ formatDurCell(offer.minBlocks, unit) }}–{{ formatDurCell(offer.maxBlocks, unit) }}
             </td>
 
-            <td class="sf-mono px-3 py-3 text-right font-medium text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right font-medium text-[color:var(--sf-ink-2)]">
               ≥ {{ offer.floor }}%
             </td>
 
-            <td class="px-4 py-3 text-right sm:px-5">
+            <td class="px-3.5 py-2 text-right">
               <span
-                class="sf-mono inline-block rounded-md px-2 py-0.5 text-[10.5px] font-semibold"
+                class="sf-mono inline-block rounded-[5px] px-2 py-0.5 text-[10px] font-semibold"
                 :class="
                   offer.owner
-                    ? 'bg-cobalt-50 text-cobalt-700'
+                    ? 'bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
                     : isUsable(offer)
                       ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
                       : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
@@ -452,100 +435,125 @@ function isUsable(x: { ok: boolean; status?: string; reasons?: string[] }) {
         </tbody>
       </table>
 
-      <div v-else class="px-6 py-12 text-center text-[13px] text-[color:var(--sf-muted)]">
-        {{
-          qLower
-            ? `No lend offers matching "${searchQuery}".`
-            : `No open ${market} lend offers match the active filters.`
-        }}
+      <div v-else class="flex h-full min-h-[140px] items-center justify-center px-6 text-[12px] text-[color:var(--sf-muted)]">
+        {{ qLower ? `No offers matching "${searchQuery}".` : `No open ${market} lend offers.` }}
       </div>
 
       <div
         v-if="offersNext"
-        class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] px-4 py-3 text-center"
+        class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-2 text-center"
       >
         <button
           type="button"
           :disabled="offersLoading"
-          class="sf-btn-outline rounded-lg px-4 py-1.5 text-[12px]"
+          class="sf-btn-outline rounded-full px-4 py-1 text-[11.5px]"
           @click="emit('load-more-offers')"
         >
-          {{ offersLoading ? "Loading…" : "Load more offers" }}
+          {{ offersLoading ? "Loading…" : "Load more" }}
         </button>
       </div>
     </div>
 
     <!-- FILLS TABLE -->
-    <div v-else class="sf-scroll max-h-[460px] overflow-auto">
-      <table v-if="filteredFills.length" class="w-full min-w-[640px] border-collapse text-left">
-        <thead
-          class="sticky top-0 z-10 border-b border-[color:var(--sf-line)] bg-[color:var(--sf-paper)]"
-        >
-          <tr class="sf-mono text-[10px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-            <th class="px-4 py-2.5 font-medium sm:px-5">Type</th>
-            <th class="px-3 py-2.5 text-right font-medium">Fill APR</th>
-            <th class="px-3 py-2.5 text-right font-medium">Cost</th>
-            <th class="px-3 py-2.5 text-right font-medium">Face</th>
-            <th class="px-3 py-2.5 text-right font-medium">Maturity</th>
-            <th class="px-3 py-2.5 text-right font-medium">Cover</th>
-            <th class="px-4 py-2.5 text-right font-medium sm:px-5">Age</th>
+    <div v-else class="sf-scroll sf-dock-well min-h-0 flex-1 overflow-auto">
+      <table v-if="filteredFills.length" class="w-full min-w-[560px] border-collapse text-left">
+        <thead class="ledger-thead sticky top-0 z-10 bg-[color:var(--sf-card)]">
+          <tr class="sf-mono text-[9.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+            <th class="px-3.5 py-2">Type</th>
+            <th class="px-2.5 py-2 text-right">APR</th>
+            <th class="px-2.5 py-2 text-right">Cost</th>
+            <th class="px-2.5 py-2 text-right">Face</th>
+            <th class="px-2.5 py-2 text-right">Term</th>
+            <th class="px-2.5 py-2 text-right">Cover</th>
+            <th class="px-3.5 py-2 text-right">Age</th>
           </tr>
         </thead>
 
-        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12.5px]">
-          <tr
-            v-for="fill in filteredFills"
-            :key="fill.id"
-            class="hover:bg-[color:var(--sf-well)]"
-          >
-            <td class="px-4 py-2.5 sm:px-5">
+        <tbody class="divide-y divide-[color:var(--sf-line)] text-[12px]">
+          <tr v-for="fill in filteredFills" :key="fill.id" class="ledger-row">
+            <td class="px-3.5 py-2">
               <span
-                class="sf-mono rounded px-1.5 py-0.5 text-[10.5px] font-semibold"
+                class="sf-mono rounded-[4px] px-1.5 py-0.5 text-[10px] font-semibold"
                 :class="
                   fill.kind === 'new'
                     ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
                     : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
                 "
               >
-                {{ fill.kind === "new" ? "New loan" : fill.kind === "shares" ? "Shares" : "Resale" }}
+                {{ fill.kind === "new" ? "New" : fill.kind === "shares" ? "Shares" : "Resale" }}
               </span>
-              <span class="sf-mono ml-2 text-[11px] text-[color:var(--sf-dim)]">
-                via {{ fill.via }}
+              <span class="sf-mono ml-1.5 text-[10.5px] text-[color:var(--sf-dim)]">
+                {{ fill.via }}
               </span>
             </td>
-            <td class="sf-mono px-3 py-2.5 text-right font-semibold text-[color:var(--sf-ink)]">
+            <td class="sf-mono px-2.5 py-2 text-right font-semibold text-[color:var(--sf-ink)]">
               {{ formatApr(fill.yieldBps) }}
             </td>
-            <td class="sf-mono px-3 py-2.5 text-right text-[color:var(--sf-ink)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink)]">
               {{ formatCompact(fill.cost) }} {{ fill.market }}
             </td>
-            <td class="sf-mono px-3 py-2.5 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink-2)]">
               {{ formatCompact(fill.face) }} {{ fill.market }}
             </td>
-            <td class="sf-mono px-3 py-2.5 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink-2)]">
               {{ formatDur(fill.d, unit) }}
             </td>
-            <td class="sf-mono px-3 py-2.5 text-right text-[color:var(--sf-ink-2)]">
+            <td class="sf-mono px-2.5 py-2 text-right text-[color:var(--sf-ink-2)]">
               {{ fill.cov != null ? `${formatNumber(fill.cov, 0, 0)}%` : "—" }}
             </td>
-            <td class="sf-mono px-4 py-2.5 text-right text-[color:var(--sf-muted)] sm:px-5">
+            <td class="sf-mono px-3.5 py-2 text-right text-[color:var(--sf-muted)]">
               {{ formatAgo(Math.max(0, height - fill.height), unit) }}
             </td>
           </tr>
         </tbody>
       </table>
 
-      <div v-else class="px-6 py-12 text-center text-[13px] text-[color:var(--sf-muted)]">
+      <div v-else class="flex h-full min-h-[140px] items-center justify-center px-6 text-[12px] text-[color:var(--sf-muted)]">
         {{
           fillsStatus === "not-configured"
-            ? "Fill history indexing is not configured on this data feed."
-            : fillsStatus === "unavailable"
-              ? "Fill history could not be loaded from the data feed."
-              : fillsStatus === "disabled"
-                ? "Fill history indexing is disabled."
-                : `No confirmed ${market} fills in the last 10 days.`
+            ? "Fill history unavailable on this feed."
+            : fillsStatus === "disabled"
+              ? "Fill history disabled."
+              : `No confirmed ${market} fills in the last 10 days.`
         }}
       </div>
     </div>
   </section>
 </template>
+
+<style scoped>
+.ledger-shell {
+  --side-rgb: var(--sf-ask-rgb);
+}
+.ledger-shell[data-side="bids"] {
+  --side-rgb: var(--sf-bid-rgb);
+}
+.ledger-shell[data-side="fills"] {
+  --side-rgb: var(--sf-cobalt-rgb);
+}
+
+.ledger-thead th {
+  border-bottom: 1px solid rgba(var(--side-rgb), 0.28);
+  box-shadow: 0 6px 12px -8px rgba(var(--side-rgb), 0.28);
+}
+
+.ledger-row {
+  transition:
+    background-color 0.14s ease,
+    box-shadow 0.2s var(--sf-ease);
+}
+
+.ledger-row:hover {
+  background: rgba(var(--sf-cobalt-rgb), 0.055);
+  box-shadow: inset 2px 0 0 rgba(var(--side-rgb), 0.45);
+}
+
+.ledger-row.is-selected {
+  background: linear-gradient(
+    90deg,
+    rgba(var(--sf-cobalt-rgb), 0.14),
+    rgba(var(--sf-cobalt-rgb), 0.04) 68%
+  );
+  box-shadow: inset 2.5px 0 0 var(--sf-cobalt);
+}
+</style>

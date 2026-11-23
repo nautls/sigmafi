@@ -2,6 +2,18 @@ export type ZcMarket = "ERG" | "SigUSD";
 export type ZcDurationUnit = "days" | "blocks";
 export type ZcSourceKind = "all" | "new" | "resale" | "shares";
 export type ZcSortKey = "apr" | "maturity" | "size";
+export type ZcStudioTab = "borrow" | "lend" | "sell" | "auction" | "shares" | "wrap";
+export type ZcChartMetric = "yield" | "pct" | "abs";
+export type ZcCurveShape = "normal" | "flat" | "inverted" | "humped";
+export type ZcCurveMove =
+  | "up"
+  | "down"
+  | "bullSteep"
+  | "bearSteep"
+  | "bullFlat"
+  | "bearFlat"
+  | "flyUp"
+  | "flyDown";
 
 export interface ZcSnapshotMeta {
   height: number;
@@ -41,10 +53,12 @@ export interface ZcRawCurvePoint {
 
 export interface ZcRawAskDot {
   askId: string;
+  kind?: string;
   blocks: number;
   bps: number;
   ok?: boolean;
   pending?: boolean;
+  borrowedByMe?: boolean;
 }
 
 export interface ZcRawWindowCurve {
@@ -77,10 +91,12 @@ export interface ZcCurvePoint {
 
 export interface ZcAskDot {
   id: string;
+  kind?: "order" | "unit" | "shares";
   d: number;
   y: number;
   ok: boolean;
   pending: boolean;
+  borrowedByMe: boolean;
 }
 
 export interface ZcWindowCurve {
@@ -147,23 +163,36 @@ export interface ZcTwoPointYield {
 
 export interface ZcCheckItem {
   key: string;
-  ok: boolean;
+  ok: boolean | null;
   detail: string;
 }
 
 export interface ZcBondSummary {
   id: string;
+  stateBoxId?: string | null;
+  created?: number;
+  state?: string;
   market: ZcMarket;
+  borrowerHash?: string | null;
   principal: number | null;
   repayment: number;
   start: number;
   maturity: number;
+  timing?: string;
+  reserve?: number;
   collateral: ZcCollateral;
   rule: string;
   ratio: number | null;
   oracleAge: number;
   cov: number | null;
+  recollateralizeFrom?: number | null;
+  refreshFrom?: number | null;
+  settlement?: Record<string, number> | null;
   vault: string | null;
+  pending?: boolean;
+  mine?: boolean;
+  borrowedByMe?: boolean;
+  checks?: ZcCheckItem[];
 }
 
 export interface ZcAskSummary {
@@ -198,6 +227,7 @@ export interface ZcAskSummary {
   ok: boolean;
   pending: boolean;
   owner: boolean;
+  borrowedByMe: boolean;
   quote: ZcQuote | null;
   rule: string;
   ratio: number | null;
@@ -254,12 +284,17 @@ export interface ZcOrderbookAskRow {
   d: number;
   window: boolean;
   ok: boolean;
+  borrowedByMe: boolean;
   reason: string | null;
+  bidAtD: number | null;
+  vsBid: number | null;
 }
 
 export interface ZcOrderbookBidRow {
   id: string;
   y: number;
+  yMin: number;
+  yMax: number;
   size: number;
   range: [number, number];
   ok: boolean;
@@ -271,7 +306,12 @@ export interface ZcOrderbook {
   bids: ZcOrderbookBidRow[];
   bestAsk: number | null;
   bestBid: number | null;
+  anchorBlocks: number | null;
+  anchorBid: number | null;
   spread: number | null;
+  spreadD: number | null;
+  spreadBid: number | null;
+  spreadAsk: number | null;
   lo: number;
   hi: number;
   band: number | null;
@@ -312,34 +352,171 @@ export interface ZcPagedResult<T> {
 
 export interface ZcSimulateMatch {
   counterpartyId: string;
+  offerId?: string;
   units: string;
   cost: string;
   face: string;
   yieldBps: number;
+  requiredBps?: number;
   maturity: number;
 }
 
 export interface ZcSimulateResponse {
   outcome: string;
+  refusal?: string | null;
   matches: ZcSimulateMatch[];
+  offers?: ZcSimulateMatch[];
   filled: string;
   remaining: string;
-  searched: number;
+  searched?: number;
+  bidLine?: { offerId?: string | null; blocks: number; bps: number }[];
+  askLine?: { askId?: string | null; blocks: number; bps: number }[];
+  askDots?: { askId: string; blocks: number; bps: number; requiredBps?: number }[];
+  collateralNeeded?: string | null;
+  rounds?: number;
 }
 
 export interface ZcMatchBuy {
   counterpartyId?: string;
   boxId?: string;
   askId?: string;
+  offerId?: string;
+  units?: string;
   maturity: number;
   yieldBps: number;
+  requiredBps?: number;
+  coverBps?: number | null;
+  borrowedByMe?: boolean;
   cost?: string;
   face?: string;
 }
 
 export interface ZcMatchesResponse {
+  type?: "offer" | "ask" | string;
+  offerId?: string;
+  askId?: string;
+  notMatchable?: string | null;
   buys?: ZcMatchBuy[];
   matches?: ZcMatchBuy[];
+  offers?: {
+    offerId: string;
+    units: string;
+    cost: string;
+    yieldBps: number;
+    requiredBps: number;
+  }[];
+  next?: {
+    taken: string[];
+    spent: string;
+    avgYieldBps: number | null;
+    rounds: number;
+  };
+  first?: string | null;
+}
+
+export interface ZcLookupResult {
+  type: string;
+  ask?: ZcAskSummary;
+  offer?: ZcOfferSummary;
+  bond?: ZcBondSummary;
+  shares?: {
+    tokenId: string;
+    bondId: string;
+    type: string;
+    shareCount: string;
+    decimals: number;
+    minLot?: string | null;
+    vault?: {
+      boxId: string;
+      state: number;
+      pulled: boolean;
+      outstanding: string;
+    } | null;
+  } | null;
+  current?: string | null;
+  spentBy?: string | null;
+  successorId?: string | null;
+  note?: string | null;
+}
+
+export interface ZcWalletToken {
+  id: string;
+  ticker: string;
+  name: string | null;
+  decimals: number;
+  amount: number;
+  rawAmount: string;
+  kind: "token" | "provision" | "receipt" | "bond" | "shares";
+  verified?: boolean;
+  unverified?: boolean;
+  usd?: number | null;
+  pool?: string | null;
+  liquidity?: string | null;
+  fees?: string | null;
+}
+
+export interface ZcActionAvailability {
+  name: string;
+  enabled: boolean;
+  reason: string | null;
+}
+
+export interface ZcPortfolioPosition {
+  id: string;
+  tokenId?: string;
+  side: "lend" | "borrow";
+  kind: "unit" | "shares";
+  units: number;
+  unitsRaw?: string;
+  holdsUnit?: boolean;
+  borrowedByMe?: boolean;
+  status: string;
+  bond: ZcBondSummary;
+  shares?: {
+    tokenId?: string;
+    bondId?: string;
+    type?: string;
+    minLot?: string | null;
+    vault?: { boxId?: string; state?: number; pulled?: boolean; outstanding?: string } | null;
+  } | null;
+  paid?: number | null;
+  at?: number | null;
+  via?: string | null;
+  mark?: {
+    basis: string;
+    bid: number | null;
+    value: number | null;
+    pnl: number | null;
+    entry: number | null;
+    atMaturity: number | null;
+  } | null;
+  actions: Record<string, ZcActionAvailability>;
+  settlement?: Record<string, number> | null;
+}
+
+export interface ZcPortfolioWrap {
+  id: string;
+  boxId?: string;
+  receiptId?: string;
+  vaultBoxId?: string;
+  receipt: ZcWalletToken;
+  token: ZcWalletToken;
+  state: "requested" | "wrapped" | string;
+  pending?: boolean;
+  inWallet: boolean;
+}
+
+export interface ZcPortfolioState {
+  loaded: boolean;
+  loading: boolean;
+  walletErg: number;
+  walletSigUsd: number;
+  walletTokens: ZcWalletToken[];
+  positions: ZcPortfolioPosition[];
+  openOrders: ZcAskSummary[];
+  openAsks: ZcAskSummary[];
+  openOffers: ZcOfferSummary[];
+  wraps: ZcPortfolioWrap[];
 }
 
 export interface ZcSearchHit {
@@ -348,6 +525,9 @@ export interface ZcSearchHit {
   market?: ZcMarket;
   status?: string;
   summary?: string;
+  title?: string;
+  yieldBps?: number;
+  borrowedByMe?: boolean;
 }
 
 export interface ZcRateBookFilters {

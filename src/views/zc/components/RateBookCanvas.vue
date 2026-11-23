@@ -15,11 +15,12 @@ import {
   ZcDurationUnit,
   ZcFillSummary,
   ZcMarket,
-  ZcOfferSummary
+  ZcOfferSummary,
+  ZcOrderbook
 } from "@/types/zc";
 import {
   bandFor,
-  bestAskAt,
+  bestWindowAskAt,
   dateAtHeight,
   DAY_BLOCKS,
   formatAgo,
@@ -45,6 +46,7 @@ export type RateBookLens = "curve" | "matrix" | "safety" | "history";
 const props = defineProps<{
   market: ZcMarket;
   curves: ZcCurves | null;
+  orderbook?: ZcOrderbook | null;
   asks: ZcAskSummary[];
   offers: ZcOfferSummary[];
   fills: ZcFillSummary[];
@@ -71,28 +73,30 @@ const emit = defineEmits<{
 
 const lens = ref<RateBookLens>("curve");
 
-const LENSES: { key: RateBookLens; label: string; subtitle: string }[] = [
-  { key: "curve", label: "Term Curve", subtitle: "Bid & ask yield envelopes" },
-  { key: "matrix", label: "Term Ladder", subtitle: "Maturity bucket spreads" },
-  { key: "safety", label: "Risk Map", subtitle: "Cover vs APR scatter" },
-  { key: "history", label: "Fills", subtitle: "10-day executions" }
+const LENSES: { key: RateBookLens; label: string }[] = [
+  { key: "curve", label: "Curve" },
+  { key: "matrix", label: "Matrix" },
+  { key: "safety", label: "Risk" },
+  { key: "history", label: "Fills" }
 ];
 
 /* ============================================================
-   Responsive SVG Container Sizing
+   Responsive SVG Container Sizing (Dynamic Width & Height)
    ============================================================ */
 const plotWrapRef = ref<HTMLElement | null>(null);
 const svgRef = ref<SVGSVGElement | null>(null);
 const plotW = ref(680);
-const PLOT_H = 368;
-const MARGIN = { l: 48, r: 16, t: 16, b: 30 };
+const plotH = ref(290);
+const MARGIN = { l: 44, r: 14, t: 14, b: 26 };
 
 let ro: ResizeObserver | null = null;
 onMounted(() => {
   if (plotWrapRef.value && "ResizeObserver" in window) {
     ro = new ResizeObserver(([entry]) => {
       const w = Math.round(entry.contentRect.width);
-      if (w >= 260) plotW.value = w;
+      const h = Math.round(entry.contentRect.height);
+      if (w >= 240) plotW.value = w;
+      if (h >= 190) plotH.value = h;
     });
     ro.observe(plotWrapRef.value);
   }
@@ -100,7 +104,7 @@ onMounted(() => {
 onBeforeUnmount(() => ro?.disconnect());
 
 const innerW = computed(() => Math.max(120, plotW.value - MARGIN.l - MARGIN.r));
-const innerH = computed(() => PLOT_H - MARGIN.t - MARGIN.b);
+const innerH = computed(() => Math.max(110, plotH.value - MARGIN.t - MARGIN.b));
 
 /* ============================================================
    Shared Curve & Domain Calculations
@@ -110,7 +114,9 @@ const windows = computed(() => visibleWindows(props.curves));
 const windowIds = computed(() => new Set(windows.value.map((w) => w.id)));
 const bandBlocks = computed(() => bandFor(props.targetBlocks));
 
-const maxDomainDays = computed(() => Math.max(30, (props.curves?.domain?.[1] || YEAR_BLOCKS) / DAY_BLOCKS));
+const maxDomainDays = computed(() =>
+  Math.max(30, (props.curves?.domain?.[1] || YEAR_BLOCKS) / DAY_BLOCKS)
+);
 
 function niceTicks(a: number, b: number, count = 5): number[] {
   const span = b - a;
@@ -151,14 +157,12 @@ const bidPoints = computed(() =>
   }))
 );
 
+// Solid ask envelope traces ONLY continuous variable-maturity window curves.
+// Discrete fixed-maturity ask dots are never stitched into or connected to ask curves.
 const askEnvelopePoints = computed(() => {
   const c = props.curves;
-  if (!c) return [] as { x: number; y: number | null }[];
-  const nonWin = c.askLine.filter((p) => !p.id || !windowIds.value.has(p.id));
-  if (!windows.value.length) {
-    return nonWin.map((p) => ({ x: p.d / DAY_BLOCKS, y: p.y == null ? null : p.y / 100 }));
-  }
-  const xs = new Set<number>(nonWin.map((p) => p.d));
+  if (!c || !windows.value.length) return [] as { x: number; y: number | null }[];
+  const xs = new Set<number>();
   for (const w of windows.value) {
     xs.add(w.min);
     xs.add(w.max);
@@ -170,17 +174,22 @@ const askEnvelopePoints = computed(() => {
   return [...xs]
     .sort((a, b) => a - b)
     .map((d) => {
-      const bps = bestAskAt(c, d, askById.value, props.height);
+      const bps = bestWindowAskAt(c, d, askById.value, props.height);
       return { x: d / DAY_BLOCKS, y: bps == null ? null : bps / 100 };
     });
 });
 
 const crossedSamples = computed(() => {
   const c = props.curves;
-  if (!c) return { upper: [] as { x: number; y: number | null }[], lower: [] as { x: number; y: number | null }[] };
+  if (!c || !windows.value.length) {
+    return {
+      upper: [] as { x: number; y: number | null }[],
+      lower: [] as { x: number; y: number | null }[]
+    };
+  }
   const lower = bidPoints.value.map((p) => ({ x: p.x, y: p.y }));
   const upper = bidPoints.value.map((p) => {
-    const bps = bestAskAt(c, p.d, askById.value, props.height);
+    const bps = bestWindowAskAt(c, p.d, askById.value, props.height);
     return { x: p.x, y: bps == null ? null : bps / 100 };
   });
   return { upper, lower };
@@ -222,7 +231,9 @@ const askDotsData = computed(() => {
     const full = askById.value.get(dot.id);
     const cost = full?.quote?.cost ?? 1;
     const active = dot.ok || props.oracleRefreshing;
-    const baseR = 2.8 + Math.sqrt(cost / maxCost) * 1.4;
+    const kind = full?.kind || dot.kind || "order";
+    const buyback = (dot.borrowedByMe || !!full?.borrowedByMe) && kind !== "order" && !full?.owner;
+    const baseR = 3 + Math.sqrt(cost / maxCost) * 1.5;
     return {
       id: dot.id,
       x: dot.d / DAY_BLOCKS,
@@ -230,9 +241,10 @@ const askDotsData = computed(() => {
       bps: dot.y,
       d: dot.d,
       cost,
-      r: dot.id === props.selectedId ? 5 : baseR,
+      r: dot.id === props.selectedId ? 5.2 : buyback ? baseR + 0.6 : baseR,
       active,
-      kind: full?.kind || "order"
+      buyback,
+      kind
     };
   });
 });
@@ -245,7 +257,7 @@ const fillDotsData = computed(() => {
       id: f.id,
       x: f.d / DAY_BLOCKS,
       y: f.yieldBps / 100,
-      opacity: Math.max(0.16, 0.65 - (Math.max(0, props.height - f.height) / 7200) * 0.48),
+      opacity: Math.max(0.18, 0.68 - (Math.max(0, props.height - f.height) / 7200) * 0.48),
       kind: f.kind
     }));
 });
@@ -276,7 +288,12 @@ const MAX_ZOOM = 8;
 const zoomView = ref<{ x: [number, number]; y: [number, number] } | null>(null);
 const hoveredOfferId = ref<string | null>(null);
 const hoverX = ref<number | null>(null);
-let panState: { startX: number; startY: number; dom: { x: [number, number]; y: [number, number] }; moved: boolean } | null = null;
+let panState: {
+  startX: number;
+  startY: number;
+  dom: { x: [number, number]; y: [number, number] };
+  moved: boolean;
+} | null = null;
 
 watch([() => props.market, maxDomainDays], () => {
   zoomView.value = null;
@@ -323,7 +340,9 @@ function zoomBy(factor: number, cx?: number, cy?: number) {
   const fy = (my - cur.y[0]) / (cur.y[1] - cur.y[0] || 1);
   const nextX = clampRange([mx - nx * fx, mx + nx * (1 - fx)], base.x);
   const nextY = clampRange([my - ny * fy, my + ny * (1 - fy)], [0, base.y[1] * 1.4]);
-  const same = Math.abs(nextX[1] - nextX[0] - baseSpanX) < baseSpanX * 1e-4 && Math.abs(nextY[1] - nextY[0] - baseSpanY) < baseSpanY * 1e-4;
+  const same =
+    Math.abs(nextX[1] - nextX[0] - baseSpanX) < baseSpanX * 1e-4 &&
+    Math.abs(nextY[1] - nextY[0] - baseSpanY) < baseSpanY * 1e-4;
   zoomView.value = same ? null : { x: nextX, y: nextY };
 }
 
@@ -357,7 +376,7 @@ const curveXTicks = computed(() => {
 
 const curveYTicks = computed(() => {
   const [y0, y1] = activeDom.value.y;
-  return niceTicks(y0, y1, 5);
+  return niceTicks(y0, y1, Math.max(3, Math.round(innerH.value / 56)));
 });
 
 function buildSegmentedPath(pts: { x: number; y: number | null }[]): string {
@@ -446,20 +465,55 @@ const selectionBandRect = computed(() => {
 
 const cursorXDays = computed(() => props.targetBlocks / DAY_BLOCKS);
 
+// Visual vertical spread connector on the curve at the exact matched maturity d*
+const spreadMarker = computed(() => {
+  const ob = props.orderbook;
+  if (
+    !ob ||
+    ob.spread == null ||
+    ob.spreadD == null ||
+    ob.spreadBid == null ||
+    ob.spreadAsk == null
+  ) {
+    return null;
+  }
+  const xDays = ob.spreadD / DAY_BLOCKS;
+  if (xDays < activeDom.value.x[0] || xDays > activeDom.value.x[1]) return null;
+  return {
+    x: sx(xDays),
+    yBid: sy(ob.spreadBid / 100),
+    yAsk: sy(ob.spreadAsk / 100),
+    crossed: ob.spread <= 0,
+    spread: ob.spread,
+    d: ob.spreadD
+  };
+});
+
 const curveHoverReadout = computed(() => {
   if (hoverX.value == null || !props.curves) return null;
-  const blocks = Math.max(DAY_BLOCKS, Math.round(hoverX.value * DAY_BLOCKS));
+  const hoveredDot = hoveredAskId.value
+    ? askDotsData.value.find((d) => d.id === hoveredAskId.value) ?? null
+    : null;
+  const blocks = hoveredDot
+    ? hoveredDot.d
+    : Math.max(DAY_BLOCKS, Math.round(hoverX.value * DAY_BLOCKS));
   const bidBps = lineAt(props.curves.bidLine, blocks);
-  const askBps = bestAskAt(props.curves, blocks, askById.value, props.height);
+  const winAskBps = bestWindowAskAt(props.curves, blocks, askById.value, props.height);
+  const askBps =
+    hoveredDot != null
+      ? winAskBps != null
+        ? Math.max(winAskBps, hoveredDot.bps)
+        : hoveredDot.bps
+      : winAskBps;
   const spread = bidBps != null && askBps != null ? bidBps - askBps : null;
   const refBps = askBps ?? bidBps;
   const parPct = refBps != null ? 100 / (1 + (refBps / 10_000) * (blocks / YEAR_BLOCKS)) : null;
-  const px = sx(hoverX.value);
-  const flip = px > plotW.value - 220;
+  const px = sx(hoveredDot ? hoveredDot.x : hoverX.value);
+  const flip = px > plotW.value - 210;
   return {
     blocks,
     px,
-    left: flip ? Math.max(MARGIN.l + 8, px - 210) : Math.min(plotW.value - 208, px + 14),
+    left: flip ? Math.max(MARGIN.l + 8, px - 196) : Math.min(plotW.value - 196, px + 14),
     bidBps,
     askBps,
     spread,
@@ -473,12 +527,14 @@ function pointerSvgCoords(e: PointerEvent | WheelEvent) {
   const r = el.getBoundingClientRect();
   return {
     X: ((e.clientX - r.left) / (r.width || 1)) * plotW.value,
-    Y: ((e.clientY - r.top) / (r.height || 1)) * PLOT_H
+    Y: ((e.clientY - r.top) / (r.height || 1)) * plotH.value
   };
 }
 
 function inPlot(X: number, Y: number) {
-  return X >= MARGIN.l && X <= MARGIN.l + innerW.value && Y >= MARGIN.t && Y <= MARGIN.t + innerH.value;
+  return (
+    X >= MARGIN.l && X <= MARGIN.l + innerW.value && Y >= MARGIN.t && Y <= MARGIN.t + innerH.value
+  );
 }
 
 function onCurvePointerDown(e: PointerEvent) {
@@ -488,7 +544,10 @@ function onCurvePointerDown(e: PointerEvent) {
   panState = {
     startX: X,
     startY: Y,
-    dom: { x: [...activeDom.value.x] as [number, number], y: [...activeDom.value.y] as [number, number] },
+    dom: {
+      x: [...activeDom.value.x] as [number, number],
+      y: [...activeDom.value.y] as [number, number]
+    },
     moved: false
   };
   if (isZoomed.value) svgRef.value?.setPointerCapture?.(e.pointerId);
@@ -540,15 +599,15 @@ function onCurveWheel(e: WheelEvent) {
 }
 
 /* ============================================================
-   LENS 2: Term Ladder Heatmap Matrix (Out-of-the-Box View!)
+   LENS 2: Term Matrix (Maturity Buckets)
    ============================================================ */
 const BUCKETS = [
-  { key: "7d", label: "1 – 7d", loDays: 1, hiDays: 7, pickDays: 7 },
-  { key: "30d", label: "7 – 30d", loDays: 7, hiDays: 30, pickDays: 30 },
-  { key: "60d", label: "30 – 60d", loDays: 30, hiDays: 60, pickDays: 60 },
-  { key: "90d", label: "60 – 90d", loDays: 60, hiDays: 90, pickDays: 90 },
-  { key: "180d", label: "90 – 180d", loDays: 90, hiDays: 180, pickDays: 180 },
-  { key: "365d", label: "180d – 1y", loDays: 180, hiDays: 365, pickDays: 365 }
+  { key: "7d", label: "1–7d", loDays: 1, hiDays: 7, pickDays: 7 },
+  { key: "30d", label: "7–30d", loDays: 7, hiDays: 30, pickDays: 30 },
+  { key: "60d", label: "30–60d", loDays: 30, hiDays: 60, pickDays: 60 },
+  { key: "90d", label: "60–90d", loDays: 60, hiDays: 90, pickDays: 90 },
+  { key: "180d", label: "90–180d", loDays: 90, hiDays: 180, pickDays: 180 },
+  { key: "365d", label: "180d–1y", loDays: 180, hiDays: 365, pickDays: 365 }
 ] as const;
 
 const ladderRows = computed(() => {
@@ -558,44 +617,86 @@ const ladderRows = computed(() => {
     const hi = b.hiDays * DAY_BLOCKS;
     const mid = Math.round((lo + hi) / 2);
 
-    // Best bid in bucket (lowest min APR across sample points)
-    let bestBid: number | null = null;
-    if (c) {
-      for (const sampleD of [lo, mid, hi]) {
-        const y = lineAt(c.bidLine, sampleD);
-        if (y != null && (bestBid == null || y < bestBid)) bestBid = y;
+    // Track true same-maturity tightest spread inside this maturity bucket
+    let tightest: { d: number; bid: number; ask: number; gap: number } | null = null;
+    const considerGap = (d: number, askY: number) => {
+      const bidY = c ? lineAt(c.bidLine, d) : null;
+      if (bidY == null) return;
+      const gap = bidY - askY;
+      if (
+        !tightest ||
+        gap < tightest.gap ||
+        (gap === tightest.gap && askY > tightest.ask)
+      ) {
+        tightest = { d, bid: bidY, ask: askY, gap };
       }
-    }
+    };
 
-    // Best ask in bucket (highest APR from asks/dots/windows falling in bucket)
-    let bestAsk: number | null = null;
+    let bestAskInBucket: number | null = null;
     let askCost = 0;
     let askCount = 0;
     for (const a of props.asks) {
       if (a.pricing === "window" && a.window) {
         if (a.window.max >= lo && a.window.min <= hi) {
           askCount += 1;
-          const clampedMid = Math.min(a.window.max, Math.max(a.window.min, mid));
-          const q = resolvedAskQuote(a, props.height, clampedMid);
-          if (q) {
-            askCost += q.cost;
-            if (bestAsk == null || q.yieldBps > bestAsk) bestAsk = q.yieldBps;
+          const wLo = Math.max(lo, a.window.min);
+          const wHi = Math.min(hi, a.window.max);
+          const wMid = Math.round((wLo + wHi) / 2);
+          const qMid = resolvedAskQuote(a, props.height, wMid);
+          if (qMid) askCost += qMid.cost;
+          for (const d of [wLo, wMid, wHi]) {
+            const q = resolvedAskQuote(a, props.height, d);
+            if (q) {
+              if (bestAskInBucket == null || q.yieldBps > bestAskInBucket) {
+                bestAskInBucket = q.yieldBps;
+              }
+              considerGap(d, q.yieldBps);
+            }
           }
         }
       } else if (a.quote && a.quote.d >= lo && a.quote.d <= hi) {
         askCount += 1;
         askCost += a.quote.cost;
-        if (bestAsk == null || a.quote.yieldBps > bestAsk) bestAsk = a.quote.yieldBps;
-      }
-    }
-    if (bestAsk == null && c) {
-      for (const sampleD of [lo, mid, hi]) {
-        const y = bestAskAt(c, sampleD, askById.value, props.height);
-        if (y != null && (bestAsk == null || y > bestAsk)) bestAsk = y;
+        if (bestAskInBucket == null || a.quote.yieldBps > bestAskInBucket) {
+          bestAskInBucket = a.quote.yieldBps;
+        }
+        considerGap(a.quote.d, a.quote.yieldBps);
       }
     }
 
-    // Offers covering this bucket
+    // Also inspect curve ask dots/windows if not already present in the loaded asks page
+    if (c) {
+      for (const dot of c.dots) {
+        if (dot.d >= lo && dot.d <= hi) {
+          if (bestAskInBucket == null || dot.y > bestAskInBucket) bestAskInBucket = dot.y;
+          considerGap(dot.d, dot.y);
+        }
+      }
+      for (const w of c.windows) {
+        if (w.max >= lo && w.min <= hi) {
+          const wLo = Math.max(lo, w.min);
+          const wHi = Math.min(hi, w.max);
+          const wMid = Math.round((wLo + wHi) / 2);
+          for (const d of [wLo, wMid, wHi]) {
+            const y = windowYieldAtPoint(w, d, askById.value, props.height);
+            if (y != null) {
+              if (bestAskInBucket == null || y > bestAskInBucket) bestAskInBucket = y;
+              considerGap(d, y);
+            }
+          }
+        }
+      }
+    }
+
+    const matched = tightest as { d: number; bid: number; ask: number; gap: number } | null;
+    // When both sides overlap at a shared maturity inside the bucket, quote the matched pair;
+    // otherwise evaluate the bid curve at the bucket midpoint so buckets trace the curve cleanly.
+    const bidAtMid = c
+      ? lineAt(c.bidLine, mid) ?? lineAt(c.bidLine, lo) ?? lineAt(c.bidLine, hi)
+      : null;
+    const bestBid = matched ? matched.bid : bidAtMid;
+    const bestAsk = matched ? matched.ask : bestAskInBucket;
+
     let offerCap = 0;
     let offerCount = 0;
     for (const o of props.offers) {
@@ -605,10 +706,11 @@ const ladderRows = computed(() => {
       }
     }
 
-    const spread = bestBid != null && bestAsk != null ? bestBid - bestAsk : null;
+    const spread = matched ? matched.gap : null;
     const crossed = spread != null && spread <= 0;
+    const refD = matched ? matched.d : mid;
     const refBps = bestAsk ?? bestBid;
-    const parPct = refBps != null ? 100 / (1 + (refBps / 10_000) * (mid / YEAR_BLOCKS)) : null;
+    const parPct = refBps != null ? 100 / (1 + (refBps / 10_000) * (refD / YEAR_BLOCKS)) : null;
     const selected = props.upto
       ? b.hiDays * DAY_BLOCKS <= props.targetBlocks + 1
       : props.targetBlocks >= lo && props.targetBlocks <= hi;
@@ -638,7 +740,7 @@ const ladderRows = computed(() => {
 });
 
 /* ============================================================
-   LENS 3: Collateral Safety Landscape (Cover vs APR Scatter!)
+   LENS 3: Risk Map (Cover vs APR Scatter)
    ============================================================ */
 const hoveredSafetyId = ref<string | null>(null);
 
@@ -667,7 +769,11 @@ const safetyData = computed(() => {
 
   const maxCov = Math.max(260, props.coverage + 60, ...pts.map((p) => p.cov * 1.12));
   const xDom: [number, number] = [100, Math.ceil(maxCov / 25) * 25];
-  const yDom = niceDomain(pts.map((p) => p.apr), 0.2, true);
+  const yDom = niceDomain(
+    pts.map((p) => p.apr),
+    0.2,
+    true
+  );
   const refBidBps = props.curves ? lineAt(props.curves.bidLine, props.targetBlocks) : null;
 
   return { pts, maturityAsks, xDom, yDom, refBidBps };
@@ -684,7 +790,9 @@ function safetyY(apr: number): number {
 }
 
 const safetyXTicks = computed(() => niceTicks(safetyData.value.xDom[0], safetyData.value.xDom[1], 5));
-const safetyYTicks = computed(() => niceTicks(safetyData.value.yDom[0], safetyData.value.yDom[1], 5));
+const safetyYTicks = computed(() =>
+  niceTicks(safetyData.value.yDom[0], safetyData.value.yDom[1], Math.max(3, Math.round(innerH.value / 56)))
+);
 
 const hoveredSafetyPoint = computed(() =>
   hoveredSafetyId.value
@@ -737,9 +845,13 @@ const historyData = computed(() => {
     y: f.yieldBps / 100,
     r: 2.1 + Math.sqrt(f.cost / maxCost) * 2.4,
     color: f.kind === "new" ? "var(--sf-bid)" : "var(--sf-ask)",
-    opacity: inSel(f.d) ? 0.9 : 0.3
+    opacity: inSel(f.d) ? 0.92 : 0.32
   }));
-  const yDom = niceDomain(fills.map((f) => f.yieldBps / 100), 0.16, true);
+  const yDom = niceDomain(
+    fills.map((f) => f.yieldBps / 100),
+    0.16,
+    true
+  );
   return { bars, avg, dots, maxVol, yDom, count: fills.length };
 });
 
@@ -776,7 +888,7 @@ const historyReadout = computed(() => {
   const px = histX(historyHoverX.value);
   return {
     px,
-    left: px > plotW.value - 190 ? Math.max(MARGIN.l + 8, px - 180) : px + 12,
+    left: px > plotW.value - 180 ? Math.max(MARGIN.l + 8, px - 172) : px + 12,
     agoText: formatAgo(Math.max(1, Math.round(props.height - targetH)), props.unit),
     count: near.length,
     avgApr
@@ -796,36 +908,27 @@ function onHistoryMove(e: PointerEvent) {
 }
 
 const historyEmptyTitle = computed(() => {
-  if (props.fillsStatus === "not-configured") return "Fill history indexing not enabled on node";
+  if (props.fillsStatus === "not-configured") return "Fill history unavailable on this feed";
   if (props.fillsStatus === "disabled") return "Fill history disabled";
-  return "No recent fills in the last 10 days";
+  return "No confirmed fills in the last 10 days";
 });
 </script>
 
 <template>
-  <section class="sf-plate flex h-full flex-col overflow-hidden rounded-2xl">
-    <!-- Top Lens Bar -->
-    <div
-      class="flex flex-wrap items-center justify-between gap-2.5 border-b border-[color:var(--sf-line)] px-4 py-2.5 sm:px-5"
-    >
-      <div
-        class="inline-flex flex-wrap rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5"
-        role="tablist"
-        aria-label="Rate Book view lens"
-      >
+  <section
+    class="sf-terminal-plate flex h-full min-h-0 flex-col overflow-hidden rounded-[20px] rounded-tl-[6px]"
+  >
+    <!-- Top Lens & Tool Bar -->
+    <div class="sf-panel-head flex shrink-0 items-center justify-between gap-2 px-3.5 py-2">
+      <div class="sf-seg" role="tablist" aria-label="Analytical view">
         <button
           v-for="item in LENSES"
           :key="item.key"
           type="button"
           role="tab"
           :aria-selected="lens === item.key"
-          :title="item.subtitle"
-          class="inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-[12px] font-semibold transition-all"
-          :class="
-            lens === item.key
-              ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-              : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-          "
+          class="sf-seg-btn px-2.5 py-1 text-[11.5px]"
+          :class="lens === item.key ? 'is-active tone-cobalt' : ''"
           @click="lens = item.key"
         >
           <activity-icon v-if="item.key === 'curve'" class="h-3.5 w-3.5" />
@@ -840,37 +943,33 @@ const historyEmptyTitle = computed(() => {
       <div v-if="lens === 'curve'" class="flex items-center gap-1.5">
         <span
           v-if="isZoomed"
-          class="sf-mono rounded bg-cobalt-50 px-1.5 py-0.5 text-[10.5px] font-semibold text-cobalt-700"
+          class="sf-mono rounded-[5px] bg-[color:var(--sf-cobalt-soft)] px-1.5 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
         >
           {{ zoomLevel.toFixed(1) }}×
         </span>
-        <div
-          class="inline-flex items-center rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5"
-          role="group"
-          aria-label="Chart zoom"
-        >
+        <div class="sf-seg" role="group" aria-label="Chart zoom">
           <button
             type="button"
-            class="grid h-6 w-6 place-items-center rounded text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-card)] hover:text-[color:var(--sf-ink)]"
+            class="sf-seg-btn h-6 w-6 !p-0"
             title="Zoom out (Ctrl + scroll)"
             aria-label="Zoom out"
             @click="zoomBy(1 / ZOOM_STEP)"
           >
-            <minus-icon class="h-3.5 w-3.5" />
+            <minus-icon class="h-3 w-3" />
           </button>
           <button
             type="button"
-            class="grid h-6 w-6 place-items-center rounded text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-card)] hover:text-[color:var(--sf-ink)]"
+            class="sf-seg-btn h-6 w-6 !p-0"
             title="Zoom in (Ctrl + scroll)"
             aria-label="Zoom in"
             @click="zoomBy(ZOOM_STEP)"
           >
-            <plus-icon class="h-3.5 w-3.5" />
+            <plus-icon class="h-3 w-3" />
           </button>
           <button
             v-if="isZoomed"
             type="button"
-            class="grid h-6 w-6 place-items-center rounded text-cobalt-600 hover:bg-[color:var(--sf-card)]"
+            class="sf-seg-btn h-6 w-6 !p-0 text-[color:var(--sf-cobalt)]"
             title="Reset zoom"
             aria-label="Reset zoom"
             @click="zoomView = null"
@@ -880,55 +979,60 @@ const historyEmptyTitle = computed(() => {
         </div>
       </div>
 
-      <div
-        v-else-if="lens === 'matrix'"
-        class="sf-mono text-[11px] text-[color:var(--sf-muted)]"
-      >
-        Click a tenor bucket to focus
-      </div>
-
-      <div
+      <span
         v-else-if="lens === 'safety'"
-        class="sf-mono text-[11px] text-[color:var(--sf-muted)]"
+        class="sf-mono rounded-[6px] border border-[color:var(--sf-line)] bg-[color:var(--sf-seg-bg)] px-2 py-0.5 text-[10.5px] text-[color:var(--sf-muted)]"
       >
-        Cover ≥ {{ coverage }}% · bubble size = capital
-      </div>
+        ≥ {{ coverage }}% · r ∝ size
+      </span>
 
-      <div v-else class="sf-mono text-[11px] text-[color:var(--sf-muted)]">
-        Last {{ formatDur(historySpanBlocks, unit) }} · {{ historyData.count }} fills
-      </div>
+      <span
+        v-else-if="lens === 'history'"
+        class="sf-mono rounded-[6px] border border-[color:var(--sf-line)] bg-[color:var(--sf-seg-bg)] px-2 py-0.5 text-[10.5px] text-[color:var(--sf-muted)]"
+      >
+        {{ formatDur(historySpanBlocks, unit) }} · {{ historyData.count }}
+      </span>
     </div>
 
     <!-- ======================================================
-         MAIN STAGE BODY
+         MAIN DYNAMIC-HEIGHT PLOT STAGE
          ====================================================== -->
-    <div ref="plotWrapRef" class="relative flex-1 bg-[color:var(--sf-card)]">
+    <div
+      ref="plotWrapRef"
+      class="plot-stage relative min-h-[224px] flex-1 overflow-hidden bg-[color:var(--sf-card)]"
+    >
+      <!-- Ambient directional studio glow behind chart (echoing HeroYieldExchange) -->
+      <div class="plot-bloom pointer-events-none absolute inset-0" aria-hidden="true" />
+
       <!-- LENS 1: TERM CURVE -->
       <template v-if="lens === 'curve'">
-        <div v-if="curveEmpty" class="flex h-[368px] flex-col items-center justify-center px-6 text-center">
+        <div
+          v-if="curveEmpty"
+          class="relative z-10 flex h-full min-h-[224px] flex-col items-center justify-center px-6 text-center"
+        >
           <div
-            class="grid h-11 w-11 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
+            class="grid h-10 w-10 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
           >
-            <activity-icon class="h-5 w-5" />
+            <activity-icon class="h-[18px] w-[18px]" />
           </div>
-          <p class="sf-serif mt-3 text-[18px] font-medium text-[color:var(--sf-ink)]">
-            {{ connected ? `No ${market} orders match these filters` : "Connecting to Ergo feed" }}
+          <p class="sf-display mt-2.5 text-[16px] font-semibold text-[color:var(--sf-ink)]">
+            {{ connected ? `No ${market} orders match filters` : "Syncing Ergo chain" }}
           </p>
-          <p class="mt-1 max-w-sm text-[12.5px] text-[color:var(--sf-muted)]">
+          <p class="mt-0.5 text-[12px] text-[color:var(--sf-muted)]">
             {{
               connected
-                ? `Try lowering minimum cover below ${coverage}%, toggling off Matchable only, or switching markets.`
-                : "Configure an Ergo GraphQL endpoint (or Lithos client URL) in the top bar to stream live zero-coupon curves."
+                ? `Lower cover below ${coverage}% or disable Matchable only.`
+                : "Configure your Explorer or GraphQL feed in the top bar."
             }}
           </p>
         </div>
 
-        <div v-else class="relative select-none" :style="{ height: `${PLOT_H}px` }">
+        <div v-else class="relative z-10 h-full w-full select-none">
           <svg
             ref="svgRef"
             :width="plotW"
-            :height="PLOT_H"
-            :viewBox="`0 0 ${plotW} ${PLOT_H}`"
+            :height="plotH"
+            :viewBox="`0 0 ${plotW} ${plotH}`"
             class="block h-full w-full"
             :class="isZoomed ? 'cursor-grab active:cursor-grabbing' : 'cursor-crosshair'"
             role="img"
@@ -937,21 +1041,23 @@ const historyEmptyTitle = computed(() => {
             @pointermove="onCurvePointerMove"
             @pointerup="onCurvePointerUp"
             @pointercancel="onCurvePointerUp"
-            @pointerleave="hoverX = null; hoveredOfferId = null"
+            @pointerleave="
+              hoverX = null;
+              hoveredOfferId = null;
+            "
             @wheel="onCurveWheel"
           >
             <defs>
               <clipPath id="sfCurvePlotClip">
-                <rect
-                  :x="MARGIN.l"
-                  :y="MARGIN.t - 4"
-                  :width="innerW"
-                  :height="innerH + 8"
-                />
+                <rect :x="MARGIN.l" :y="MARGIN.t - 4" :width="innerW" :height="innerH + 8" />
               </clipPath>
               <linearGradient id="sfRbBidGrad" x1="0" y1="0" x2="0" y2="1">
-                <stop offset="0%" stop-color="var(--sf-bid)" stop-opacity="0.16" />
+                <stop offset="0%" stop-color="var(--sf-bid)" stop-opacity="0.2" />
                 <stop offset="100%" stop-color="var(--sf-bid)" stop-opacity="0.0" />
+              </linearGradient>
+              <linearGradient id="sfBandGrad" x1="0" y1="0" x2="0" y2="1">
+                <stop offset="0%" stop-color="var(--sf-cobalt)" stop-opacity="0.11" />
+                <stop offset="100%" stop-color="var(--sf-cobalt)" stop-opacity="0.02" />
               </linearGradient>
               <pattern
                 id="sfCrossHatch"
@@ -960,12 +1066,20 @@ const historyEmptyTitle = computed(() => {
                 patternUnits="userSpaceOnUse"
                 patternTransform="rotate(45)"
               >
-                <rect width="6" height="6" fill="var(--sf-ask)" fill-opacity="0.11" />
-                <line x1="0" y1="0" x2="0" y2="6" stroke="var(--sf-ask)" stroke-opacity="0.32" stroke-width="1.5" />
+                <rect width="6" height="6" fill="var(--sf-ask)" fill-opacity="0.12" />
+                <line
+                  x1="0"
+                  y1="0"
+                  x2="0"
+                  y2="6"
+                  stroke="var(--sf-ask)"
+                  stroke-opacity="0.38"
+                  stroke-width="1.5"
+                />
               </pattern>
             </defs>
 
-            <!-- Grid -->
+            <!-- Coordinate Grid -->
             <g>
               <g v-for="yt in curveYTicks" :key="`y-${yt}`">
                 <line
@@ -974,10 +1088,10 @@ const historyEmptyTitle = computed(() => {
                   :y1="sy(yt)"
                   :y2="sy(yt)"
                   :stroke="yt === 0 ? 'var(--sf-line-strong)' : 'var(--sf-line)'"
-                  :stroke-dasharray="yt === 0 ? undefined : '3 4'"
+                  :stroke-dasharray="yt === 0 ? undefined : '3 5'"
                 />
                 <text
-                  :x="MARGIN.l - 8"
+                  :x="MARGIN.l - 7"
                   :y="sy(yt) + 3.5"
                   text-anchor="end"
                   fill="var(--sf-muted)"
@@ -995,10 +1109,11 @@ const historyEmptyTitle = computed(() => {
                   :y1="MARGIN.t"
                   :y2="MARGIN.t + innerH"
                   stroke="var(--sf-line)"
+                  stroke-opacity="0.7"
                 />
                 <text
                   :x="sx(xt)"
-                  :y="PLOT_H - 9"
+                  :y="plotH - 7"
                   text-anchor="middle"
                   fill="var(--sf-muted)"
                   font-size="10"
@@ -1025,14 +1140,13 @@ const historyEmptyTitle = computed(() => {
                 :y="MARGIN.t"
                 :width="selectionBandRect.w"
                 :height="innerH"
-                fill="var(--sf-cobalt)"
-                fill-opacity="0.065"
+                fill="url(#sfBandGrad)"
               />
 
               <!-- Crossed Market Hatch Ribbon -->
               <path v-if="crossAreaD" :d="crossAreaD" fill="url(#sfCrossHatch)" />
 
-              <!-- Individual Bid Curves Overlay -->
+              <!-- Individual Bid Offer Filaments -->
               <g v-if="showOffers">
                 <path
                   v-for="fil in offerFilaments"
@@ -1040,9 +1154,9 @@ const historyEmptyTitle = computed(() => {
                   :d="buildSegmentedPath(fil.pts)"
                   fill="none"
                   stroke="var(--sf-bid)"
-                  :stroke-width="hoveredOfferId === fil.id || selectedId === fil.id ? 2 : 1"
+                  :stroke-width="hoveredOfferId === fil.id || selectedId === fil.id ? 2.1 : 1"
                   :stroke-opacity="
-                    hoveredOfferId === fil.id || selectedId === fil.id ? 0.85 : fil.ok ? 0.24 : 0.1
+                    hoveredOfferId === fil.id || selectedId === fil.id ? 0.9 : fil.ok ? 0.26 : 0.1
                   "
                   class="cursor-pointer transition-opacity"
                   @pointerenter="hoveredOfferId = fil.id"
@@ -1052,22 +1166,22 @@ const historyEmptyTitle = computed(() => {
                 />
               </g>
 
-              <!-- Window Order Curves -->
+              <!-- Variable-Maturity Window Order Curves -->
               <g v-for="wc in windowCurvesData" :key="`win-${wc.id}`">
                 <path
                   :d="buildSegmentedPath(wc.pts)"
                   fill="none"
                   stroke="var(--sf-ask)"
-                  :stroke-width="selectedId === wc.id ? 2.6 : 1.45"
-                  stroke-dasharray="5 3"
-                  :stroke-opacity="selectedId === wc.id ? 1 : 0.65"
+                  :stroke-width="selectedId === wc.id ? 2 : 0.9"
+                  :stroke-dasharray="selectedId === wc.id ? '4 2.5' : '3 3'"
+                  :stroke-opacity="selectedId === wc.id ? 0.95 : 0.4"
                   class="cursor-pointer"
                   @pointerdown.stop
                   @click.stop="emit('select-ask', wc.id)"
                 />
               </g>
 
-              <!-- 10d Fills Scatter -->
+              <!-- 10d Confirmed Fills Scatter -->
               <g v-if="showFills">
                 <rect
                   v-for="f in fillDotsData"
@@ -1082,19 +1196,20 @@ const historyEmptyTitle = computed(() => {
                 />
               </g>
 
-              <!-- Best Bid Envelope -->
+              <!-- Best Bid Envelope (luminous emerald) -->
               <path v-if="bidAreaD" :d="bidAreaD" fill="url(#sfRbBidGrad)" />
               <path
                 v-if="bidLineD"
                 :d="bidLineD"
                 fill="none"
                 stroke="var(--sf-bid)"
-                stroke-width="2.4"
+                stroke-width="2.5"
                 stroke-linecap="round"
                 stroke-linejoin="round"
+                class="curve-glow-bid"
               />
 
-              <!-- Best Ask Envelope -->
+              <!-- Best Ask Envelope (luminous amber) -->
               <path
                 v-if="askLineD"
                 :d="askLineD"
@@ -1103,13 +1218,16 @@ const historyEmptyTitle = computed(() => {
                 stroke-width="2.2"
                 stroke-linecap="round"
                 stroke-linejoin="round"
+                class="curve-glow-ask"
               />
 
               <!-- Size-Scaled Clickable Ask Nodes -->
               <g
                 v-for="dot in askDotsData"
                 :key="dot.id"
-                class="cursor-pointer"
+                class="ask-dot-node sf-rb-ask-dot cursor-pointer"
+                :class="{ 'is-selected': selectedId === dot.id }"
+                :style="{ '--dot-tone': dot.buyback ? 'var(--sf-bid)' : 'var(--sf-ask)' }"
                 @pointerenter="hoveredAskId = dot.id"
                 @pointerleave="hoveredAskId = null"
                 @pointerdown.stop
@@ -1117,32 +1235,71 @@ const historyEmptyTitle = computed(() => {
               >
                 <circle :cx="sx(dot.x)" :cy="sy(dot.y)" r="10" fill="transparent" />
                 <circle
-                  v-if="selectedId === dot.id || hoveredAskId === dot.id"
+                  v-if="selectedId === dot.id || hoveredAskId === dot.id || dot.buyback"
+                  class="sf-rb-dot-halo"
                   :cx="sx(dot.x)"
                   :cy="sy(dot.y)"
-                  :r="dot.r + 2.5"
-                  :fill="selectedId === dot.id ? 'var(--sf-cobalt)' : 'var(--sf-ask)'"
-                  :fill-opacity="selectedId === dot.id ? 0.2 : 0.16"
+                  :r="dot.r + 3.2"
+                  :fill="dot.buyback ? 'var(--sf-bid)' : 'var(--sf-ask)'"
+                  fill-opacity="0.18"
                 />
                 <circle
+                  class="sf-rb-dot-core"
                   :cx="sx(dot.x)"
                   :cy="sy(dot.y)"
-                  :r="dot.r"
+                  :r="hoveredAskId === dot.id ? dot.r + 1.1 : dot.r"
                   :fill="
-                    selectedId === dot.id
-                      ? 'var(--sf-card)'
+                    dot.buyback
+                      ? 'var(--sf-bid)'
                       : dot.active
                         ? 'var(--sf-ask)'
                         : 'var(--sf-card)'
                   "
-                  :stroke="selectedId === dot.id ? 'var(--sf-cobalt)' : dot.active ? 'var(--sf-card)' : 'var(--sf-ask)'"
-                  :stroke-width="selectedId === dot.id ? 1.8 : 1.3"
+                  :stroke="
+                    dot.buyback
+                      ? 'var(--sf-card)'
+                      : dot.active
+                        ? 'var(--sf-card)'
+                        : 'var(--sf-ask)'
+                  "
+                  :stroke-width="selectedId === dot.id ? 1.5 : 1.4"
                 >
                   <title>
                     {{ kindLabel(dot.kind) }} · {{ formatApr(dot.bps) }} ·
-                    {{ formatDur(dot.d, unit) }} · {{ formatMarketAmount(dot.cost, market) }}
+                    {{ formatDur(dot.d, unit) }} · {{ formatMarketAmount(dot.cost, market)
+                    }}{{ dot.buyback ? " · Your loan (buy back)" : "" }}
                   </title>
                 </circle>
+              </g>
+
+              <!-- Tightest Same-Maturity Spread Connector (anchors Spread Bridge to Curve) -->
+              <g v-if="spreadMarker" pointer-events="none">
+                <line
+                  :x1="spreadMarker.x"
+                  :x2="spreadMarker.x"
+                  :y1="spreadMarker.yBid"
+                  :y2="spreadMarker.yAsk"
+                  :stroke="spreadMarker.crossed ? 'var(--sf-ask)' : 'var(--sf-cobalt)'"
+                  stroke-width="1.8"
+                  stroke-dasharray="2.5 2.5"
+                  stroke-opacity="0.72"
+                />
+                <circle
+                  :cx="spreadMarker.x"
+                  :cy="spreadMarker.yBid"
+                  r="3"
+                  fill="var(--sf-card)"
+                  stroke="var(--sf-bid)"
+                  stroke-width="1.6"
+                />
+                <circle
+                  :cx="spreadMarker.x"
+                  :cy="spreadMarker.yAsk"
+                  r="3"
+                  fill="var(--sf-card)"
+                  stroke="var(--sf-ask)"
+                  stroke-width="1.6"
+                />
               </g>
 
               <!-- Active Maturity Cursor Line -->
@@ -1153,16 +1310,20 @@ const historyEmptyTitle = computed(() => {
                   :y1="MARGIN.t"
                   :y2="MARGIN.t + innerH"
                   stroke="var(--sf-cobalt)"
-                  stroke-width="1.2"
+                  stroke-width="1.25"
                   stroke-dasharray="3 3"
-                  stroke-opacity="0.8"
+                  stroke-opacity="0.85"
                 />
                 <text
-                  :x="sx(cursorXDays) > MARGIN.l + innerW - 76 ? sx(cursorXDays) - 6 : sx(cursorXDays) + 6"
-                  :y="MARGIN.t + 12"
-                  :text-anchor="sx(cursorXDays) > MARGIN.l + innerW - 76 ? 'end' : 'start'"
+                  :x="
+                    sx(cursorXDays) > MARGIN.l + innerW - 72
+                      ? sx(cursorXDays) - 6
+                      : sx(cursorXDays) + 6
+                  "
+                  :y="MARGIN.t + 11"
+                  :text-anchor="sx(cursorXDays) > MARGIN.l + innerW - 72 ? 'end' : 'start'"
                   fill="var(--sf-cobalt)"
-                  font-size="10.5"
+                  font-size="10"
                   font-weight="600"
                   class="sf-mono"
                 >
@@ -1185,19 +1346,19 @@ const historyEmptyTitle = computed(() => {
                 v-if="curveHoverReadout.bidBps != null"
                 :cx="curveHoverReadout.px"
                 :cy="sy(curveHoverReadout.bidBps / 100)"
-                r="3.5"
+                r="4"
                 fill="var(--sf-bid)"
                 stroke="var(--sf-card)"
-                stroke-width="1.5"
+                stroke-width="1.8"
               />
               <circle
                 v-if="curveHoverReadout.askBps != null"
                 :cx="curveHoverReadout.px"
                 :cy="sy(curveHoverReadout.askBps / 100)"
-                r="3.5"
+                r="4"
                 fill="var(--sf-ask)"
                 stroke="var(--sf-card)"
-                stroke-width="1.5"
+                stroke-width="1.8"
               />
             </g>
           </svg>
@@ -1205,24 +1366,26 @@ const historyEmptyTitle = computed(() => {
           <!-- Floating Crosshair Telemetry Card -->
           <div
             v-if="curveHoverReadout"
-            class="sf-plate pointer-events-none absolute top-3 z-20 w-48 rounded-xl px-3 py-2.5 text-[11px]"
+            class="sf-popover pointer-events-none absolute top-2.5 z-20 w-[184px] rounded-xl px-2.5 py-2 text-[11px]"
             :style="{ left: `${curveHoverReadout.left}px` }"
           >
-            <div class="sf-mono flex items-center justify-between border-b border-[color:var(--sf-line)] pb-1.5 font-semibold text-[color:var(--sf-ink)]">
+            <div
+              class="sf-mono flex items-center justify-between border-b border-[color:var(--sf-line)] pb-1 font-semibold text-[color:var(--sf-ink)]"
+            >
               <span>{{ formatDur(curveHoverReadout.blocks, unit) }}</span>
               <span class="font-normal text-[color:var(--sf-muted)]">
                 {{ dateAtHeight(height + curveHoverReadout.blocks, height) }}
               </span>
             </div>
-            <div class="sf-mono mt-1.5 space-y-1">
+            <div class="sf-mono mt-1.5 space-y-0.5">
               <div class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Best bid</span>
+                <span class="text-[color:var(--sf-muted)]">Bid</span>
                 <span class="font-semibold text-[color:var(--sf-bid)]">
                   {{ formatApr(curveHoverReadout.bidBps) }}
                 </span>
               </div>
               <div class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Best ask</span>
+                <span class="text-[color:var(--sf-muted)]">Ask</span>
                 <span class="font-semibold text-[color:var(--sf-ask)]">
                   {{ formatApr(curveHoverReadout.askBps) }}
                 </span>
@@ -1242,8 +1405,10 @@ const historyEmptyTitle = computed(() => {
               </div>
               <div class="flex justify-between border-t border-[color:var(--sf-line)] pt-1">
                 <span class="text-[color:var(--sf-muted)]">Par P/F</span>
-                <span class="font-semibold text-cobalt-600">
-                  {{ curveHoverReadout.parPct != null ? `${curveHoverReadout.parPct.toFixed(2)}%` : "—" }}
+                <span class="font-semibold text-[color:var(--sf-cobalt)]">
+                  {{
+                    curveHoverReadout.parPct != null ? `${curveHoverReadout.parPct.toFixed(2)}%` : "—"
+                  }}
                 </span>
               </div>
             </div>
@@ -1251,25 +1416,24 @@ const historyEmptyTitle = computed(() => {
         </div>
       </template>
 
-      <!-- LENS 2: TERM LADDER HEATMAP MATRIX (OUT-OF-THE-BOX VIEW!) -->
+      <!-- LENS 2: TERM MATRIX -->
       <template v-else-if="lens === 'matrix'">
-        <div class="min-h-[368px] p-4 sm:p-5">
-          <div class="grid grid-cols-1 gap-3 sm:grid-cols-2 lg:grid-cols-3">
+        <div class="sf-scroll relative z-10 h-full overflow-y-auto p-3">
+          <div class="grid h-full grid-cols-2 gap-2.5 sm:grid-cols-3">
             <button
               v-for="row in ladderRows.rows"
               :key="row.key"
               type="button"
-              class="group relative flex flex-col justify-between rounded-xl border p-3.5 text-left transition-all"
+              class="matrix-cell group relative flex flex-col justify-between rounded-[14px] border p-2.5 text-left transition-all"
               :class="
                 row.selected
-                  ? 'border-cobalt-600/45 bg-cobalt-50/40 shadow-sm'
-                  : 'border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] hover:border-[color:var(--sf-line-strong)] hover:bg-[color:var(--sf-well)]'
+                  ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/50'
+                  : 'border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] hover:border-[color:var(--sf-line-strong)]'
               "
               @click="emit('update:targetBlocks', row.pickDays * DAY_BLOCKS)"
             >
-              <!-- Bucket Header -->
-              <div class="flex items-center justify-between gap-2">
-                <span class="sf-serif text-[17px] font-semibold text-[color:var(--sf-ink)]">
+              <div class="flex items-center justify-between gap-1.5">
+                <span class="sf-display text-[14.5px] font-semibold text-[color:var(--sf-ink)]">
                   {{
                     unit === "blocks"
                       ? `${formatDur(row.lo, "blocks").replace(" blk", "")}–${formatDur(row.hi, "blocks")}`
@@ -1278,93 +1442,74 @@ const historyEmptyTitle = computed(() => {
                 </span>
                 <span
                   v-if="row.crossed"
-                  class="sf-mono rounded bg-[color:var(--sf-ask-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-ask)]"
+                  class="sf-mono rounded-[4px] bg-[color:var(--sf-ask-soft)] px-1.5 py-0.5 text-[9px] font-semibold uppercase text-[color:var(--sf-ask)]"
                 >
-                  Crossed
+                  Cross
                 </span>
-                <span
-                  v-else-if="row.spread != null"
-                  class="sf-mono text-[10.5px] text-[color:var(--sf-muted)]"
-                >
-                  {{ formatBp(row.spread) }}
+                <span v-else class="sf-mono text-[10px] text-[color:var(--sf-muted)]">
+                  {{ row.spread != null ? formatBp(row.spread) : "—" }}
                 </span>
-                <span v-else class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]"> — </span>
               </div>
 
-              <!-- Shared-Scale APR Gauge -->
-              <div class="mt-3">
-                <div class="relative h-5 rounded-md bg-[color:var(--sf-card)] px-2 ring-1 ring-[color:var(--sf-line)]">
-                  <div class="absolute inset-x-2 top-1/2 h-[2px] -translate-y-1/2 rounded bg-[color:var(--sf-line-strong)]" />
-                  <!-- Spread Connector Segment -->
+              <!-- Shared-Scale Spread Gauge -->
+              <div class="my-2">
+                <div
+                  class="relative h-4 rounded-md bg-[color:var(--sf-card)] px-1.5 ring-1 ring-[color:var(--sf-line)]"
+                >
+                  <div
+                    class="absolute inset-x-1.5 top-1/2 h-[1.5px] -translate-y-1/2 rounded bg-[color:var(--sf-line-strong)]"
+                  />
                   <div
                     v-if="row.bestBid != null && row.bestAsk != null"
                     class="absolute top-1/2 h-1.5 -translate-y-1/2 rounded-full"
                     :style="{
-                      left: `calc(8px + ${(Math.min(row.bestBid, row.bestAsk) / ladderRows.maxBps) * 84}%)`,
-                      width: `max(4px, ${(Math.abs(row.bestAsk - row.bestBid) / ladderRows.maxBps) * 84}%)`,
+                      left: `calc(6px + ${(Math.min(row.bestBid, row.bestAsk) / ladderRows.maxBps) * 86}%)`,
+                      width: `max(4px, ${(Math.abs(row.bestAsk - row.bestBid) / ladderRows.maxBps) * 86}%)`,
                       background: row.crossed ? 'var(--sf-ask)' : 'var(--sf-cobalt)',
-                      opacity: row.crossed ? 0.55 : 0.35
+                      opacity: row.crossed ? 0.65 : 0.4
                     }"
                   />
-                  <!-- Bid Anchor Dot -->
                   <span
                     v-if="row.bestBid != null"
                     class="absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[color:var(--sf-card)] bg-[color:var(--sf-bid)]"
-                    :style="{ left: `calc(8px + ${(row.bestBid / ladderRows.maxBps) * 84}%)` }"
-                    :title="`Best Bid ${formatApr(row.bestBid)}`"
+                    :style="{ left: `calc(6px + ${(row.bestBid / ladderRows.maxBps) * 86}%)` }"
                   />
-                  <!-- Ask Anchor Dot -->
                   <span
                     v-if="row.bestAsk != null"
                     class="absolute top-1/2 h-2.5 w-2.5 -translate-x-1/2 -translate-y-1/2 rounded-full border-2 border-[color:var(--sf-card)] bg-[color:var(--sf-ask)]"
-                    :style="{ left: `calc(8px + ${(row.bestAsk / ladderRows.maxBps) * 84}%)` }"
-                    :title="`Best Ask ${formatApr(row.bestAsk)}`"
+                    :style="{ left: `calc(6px + ${(row.bestAsk / ladderRows.maxBps) * 86}%)` }"
                   />
                 </div>
 
-                <div class="sf-mono mt-2 flex items-center justify-between text-[12px]">
-                  <div>
-                    <span class="block text-[9.5px] uppercase tracking-[0.08em] text-[color:var(--sf-muted)]">
-                      Bid
-                    </span>
-                    <span class="font-semibold text-[color:var(--sf-bid)]">
-                      {{ formatApr(row.bestBid) }}
-                    </span>
-                  </div>
-                  <div class="text-center">
-                    <span class="block text-[9.5px] uppercase tracking-[0.08em] text-[color:var(--sf-muted)]">
-                      Par
-                    </span>
-                    <span class="font-medium text-cobalt-600">
-                      {{ row.parPct != null ? `${row.parPct.toFixed(1)}%` : "—" }}
-                    </span>
-                  </div>
-                  <div class="text-right">
-                    <span class="block text-[9.5px] uppercase tracking-[0.08em] text-[color:var(--sf-muted)]">
-                      Ask
-                    </span>
-                    <span class="font-semibold text-[color:var(--sf-ask)]">
-                      {{ formatApr(row.bestAsk) }}
-                    </span>
-                  </div>
+                <div class="sf-mono mt-1.5 flex items-baseline justify-between text-[11.5px]">
+                  <span class="font-semibold text-[color:var(--sf-bid)]">
+                    {{ formatApr(row.bestBid) }}
+                  </span>
+                  <span class="text-[10px] font-medium text-[color:var(--sf-cobalt)]">
+                    {{ row.parPct != null ? `${row.parPct.toFixed(1)}%` : "—" }}
+                  </span>
+                  <span class="font-semibold text-[color:var(--sf-ask)]">
+                    {{ formatApr(row.bestAsk) }}
+                  </span>
                 </div>
               </div>
 
-              <!-- Liquidity Balance Strip -->
-              <div class="mt-3 border-t border-[color:var(--sf-line)] pt-2.5">
-                <div class="flex h-1.5 overflow-hidden rounded-full bg-[color:var(--sf-line)]">
+              <div>
+                <div class="flex h-1 overflow-hidden rounded-full bg-[color:var(--sf-line)]">
                   <div
-                    class="h-full bg-[color:var(--sf-bid)] transition-all"
+                    class="h-full bg-[color:var(--sf-bid)] transition-all duration-300"
                     :style="{ width: `${(row.offerCap / ladderRows.maxLiq) * 100}%` }"
                   />
                   <div
-                    class="h-full bg-[color:var(--sf-ask)] transition-all"
+                    class="h-full bg-[color:var(--sf-ask)] transition-all duration-300"
                     :style="{ width: `${(row.askCost / ladderRows.maxLiq) * 100}%` }"
                   />
                 </div>
-                <div class="sf-mono mt-1.5 flex items-center justify-between text-[10.5px] text-[color:var(--sf-muted)]">
-                  <span>{{ formatCompact(row.offerCap) }} {{ market }} ({{ row.offerCount }}b)</span>
-                  <span>{{ formatCompact(row.askCost) }} {{ market }} ({{ row.askCount }}a)</span>
+                <div
+                  class="sf-mono mt-1 flex items-center justify-between text-[10px] text-[color:var(--sf-muted)]"
+                >
+                  <span>{{ formatCompact(row.offerCap) }} ({{ row.offerCount }}b)</span>
+                  <span>{{ formatCompact(row.askCost) }} ({{ row.askCount }}a)</span>
                 </div>
               </div>
             </button>
@@ -1372,225 +1517,218 @@ const historyEmptyTitle = computed(() => {
         </div>
       </template>
 
-      <!-- LENS 3: COLLATERAL SAFETY LANDSCAPE (COVER × APR SCATTER!) -->
+      <!-- LENS 3: RISK MAP (COVER × APR SCATTER) -->
       <template v-else-if="lens === 'safety'">
         <div
           v-if="!safetyData.pts.length && !safetyData.maturityAsks.length"
-          class="flex h-[368px] flex-col items-center justify-center px-6 text-center"
+          class="relative z-10 flex h-full min-h-[224px] flex-col items-center justify-center px-6 text-center"
         >
           <div
-            class="grid h-11 w-11 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
+            class="grid h-10 w-10 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
           >
-            <shield-icon class="h-5 w-5" />
+            <shield-icon class="h-[18px] w-[18px]" />
           </div>
-          <p class="sf-serif mt-3 text-[18px] font-medium text-[color:var(--sf-ink)]">
-            No open {{ market }} asks to plot
-          </p>
-          <p class="mt-1 text-[12.5px] text-[color:var(--sf-muted)]">
-            Every open ask appears here mapped by its collateral coverage ratio against offered APR.
+          <p class="sf-display mt-2.5 text-[16px] font-semibold text-[color:var(--sf-ink)]">
+            No open {{ market }} asks
           </p>
         </div>
 
-        <div v-else class="relative">
-          <svg
-            :width="plotW"
-            :height="PLOT_H"
-            :viewBox="`0 0 ${plotW} ${PLOT_H}`"
-            class="block w-full select-none"
-            role="img"
-            :aria-label="`${market} collateral cover vs APR risk map`"
-          >
-            <!-- Below-filter zone tint -->
-            <rect
-              :x="MARGIN.l"
-              :y="MARGIN.t"
-              :width="Math.max(0, safetyX(coverage) - MARGIN.l)"
-              :height="innerH"
-              fill="var(--sf-ask)"
-              fill-opacity="0.045"
-            />
-
-            <!-- Horizontal Y Grid (APR) -->
-            <g v-for="yt in safetyYTicks" :key="`sy-${yt}`">
-              <line
-                :x1="MARGIN.l"
-                :x2="MARGIN.l + innerW"
-                :y1="safetyY(yt)"
-                :y2="safetyY(yt)"
-                :stroke="yt === 0 ? 'var(--sf-line-strong)' : 'var(--sf-line)'"
-                :stroke-dasharray="yt === 0 ? undefined : '3 4'"
-              />
-              <text
-                :x="MARGIN.l - 8"
-                :y="safetyY(yt) + 3.5"
-                text-anchor="end"
-                fill="var(--sf-muted)"
-                font-size="10"
-                class="sf-mono"
-              >
-                {{ yt.toFixed(0) }}%
-              </text>
-            </g>
-
-            <!-- Vertical X Grid (Cover %) -->
-            <g v-for="xt in safetyXTicks" :key="`sx-${xt}`">
-              <line
-                :x1="safetyX(xt)"
-                :x2="safetyX(xt)"
-                :y1="MARGIN.t"
-                :y2="MARGIN.t + innerH"
-                stroke="var(--sf-line)"
-              />
-              <text
-                :x="safetyX(xt)"
-                :y="PLOT_H - 9"
-                text-anchor="middle"
-                fill="var(--sf-muted)"
-                font-size="10"
-                class="sf-mono"
-              >
-                {{ xt }}%
-              </text>
-            </g>
-
-            <!-- Min Floor 125% Line -->
-            <line
-              :x1="safetyX(MIN_COVER)"
-              :x2="safetyX(MIN_COVER)"
-              :y1="MARGIN.t"
-              :y2="MARGIN.t + innerH"
-              stroke="var(--sf-danger)"
-              stroke-dasharray="2 4"
-              stroke-opacity="0.5"
-            />
-
-            <!-- Active Cover Filter Line -->
-            <g>
-              <line
-                :x1="safetyX(coverage)"
-                :x2="safetyX(coverage)"
-                :y1="MARGIN.t"
-                :y2="MARGIN.t + innerH"
-                stroke="var(--sf-cobalt)"
-                stroke-width="1.4"
-                stroke-dasharray="4 3"
-              />
-              <text
-                :x="safetyX(coverage) + 6"
-                :y="MARGIN.t + 12"
-                fill="var(--sf-cobalt)"
-                font-size="10"
-                font-weight="600"
-                class="sf-mono"
-              >
-                Filter ≥ {{ coverage }}%
-              </text>
-            </g>
-
-            <!-- Reference Best Bid Line -->
-            <g v-if="safetyData.refBidBps != null">
-              <line
-                :x1="MARGIN.l"
-                :x2="MARGIN.l + innerW"
-                :y1="safetyY(safetyData.refBidBps / 100)"
-                :y2="safetyY(safetyData.refBidBps / 100)"
-                stroke="var(--sf-bid)"
-                stroke-width="1.2"
-                stroke-dasharray="5 4"
-              />
-              <text
-                :x="MARGIN.l + innerW - 6"
-                :y="safetyY(safetyData.refBidBps / 100) - 5"
-                text-anchor="end"
-                fill="var(--sf-bid)"
-                font-size="10"
-                font-weight="600"
-                class="sf-mono"
-              >
-                Best bid {{ formatApr(safetyData.refBidBps) }}
-              </text>
-            </g>
-
-            <!-- Bubbles -->
-            <g
-              v-for="pt in safetyData.pts"
-              :key="pt.id"
-              class="cursor-pointer"
-              @pointerenter="hoveredSafetyId = pt.id"
-              @pointerleave="hoveredSafetyId = null"
-              @click="emit('select-ask', pt.id)"
+        <div v-else class="relative z-10 flex h-full flex-col">
+          <div class="relative min-h-0 flex-1">
+            <svg
+              :width="plotW"
+              :height="plotH"
+              :viewBox="`0 0 ${plotW} ${plotH}`"
+              class="block h-full w-full select-none"
+              role="img"
+              :aria-label="`${market} collateral cover vs APR risk map`"
             >
-              <circle :cx="safetyX(pt.cov)" :cy="safetyY(pt.apr)" r="11" fill="transparent" />
-              <circle
-                v-if="selectedId === pt.id || hoveredSafetyId === pt.id"
-                :cx="safetyX(pt.cov)"
-                :cy="safetyY(pt.apr)"
-                :r="pt.r + 2.5"
-                :fill="selectedId === pt.id ? 'var(--sf-cobalt)' : kindColor(pt.kind)"
-                fill-opacity="0.2"
+              <rect
+                :x="MARGIN.l"
+                :y="MARGIN.t"
+                :width="Math.max(0, safetyX(coverage) - MARGIN.l)"
+                :height="innerH"
+                fill="var(--sf-ask)"
+                fill-opacity="0.05"
               />
-              <circle
-                :cx="safetyX(pt.cov)"
-                :cy="safetyY(pt.apr)"
-                :r="pt.r"
-                :fill="pt.ok ? kindColor(pt.kind) : 'var(--sf-card)'"
-                :stroke="
-                  selectedId === pt.id
-                    ? 'var(--sf-ink)'
-                    : pt.ok
-                      ? 'var(--sf-card)'
-                      : kindColor(pt.kind)
-                "
-                :stroke-width="selectedId === pt.id ? 1.8 : 1.3"
-                fill-opacity="0.9"
-              />
-            </g>
-          </svg>
 
-          <!-- Floating Hover Info -->
-          <div
-            v-if="hoveredSafetyPoint"
-            class="sf-plate pointer-events-none absolute right-4 top-4 z-20 w-52 rounded-xl px-3 py-2.5 text-[11px]"
-          >
-            <div class="sf-mono flex items-center justify-between border-b border-[color:var(--sf-line)] pb-1.5 font-semibold text-[color:var(--sf-ink)]">
-              <span>{{ kindLabel(hoveredSafetyPoint.kind) }}</span>
-              <span class="text-[color:var(--sf-ask)]">{{ formatApr(hoveredSafetyPoint.yieldBps) }}</span>
-            </div>
-            <div class="sf-mono mt-1.5 space-y-1">
-              <div class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Cover now</span>
-                <span class="font-semibold text-[color:var(--sf-bid)]">
-                  {{ Math.round(hoveredSafetyPoint.cov) }}%
+              <g v-for="yt in safetyYTicks" :key="`sy-${yt}`">
+                <line
+                  :x1="MARGIN.l"
+                  :x2="MARGIN.l + innerW"
+                  :y1="safetyY(yt)"
+                  :y2="safetyY(yt)"
+                  :stroke="yt === 0 ? 'var(--sf-line-strong)' : 'var(--sf-line)'"
+                  :stroke-dasharray="yt === 0 ? undefined : '3 5'"
+                />
+                <text
+                  :x="MARGIN.l - 7"
+                  :y="safetyY(yt) + 3.5"
+                  text-anchor="end"
+                  fill="var(--sf-muted)"
+                  font-size="10"
+                  class="sf-mono"
+                >
+                  {{ yt.toFixed(0) }}%
+                </text>
+              </g>
+
+              <g v-for="xt in safetyXTicks" :key="`sx-${xt}`">
+                <line
+                  :x1="safetyX(xt)"
+                  :x2="safetyX(xt)"
+                  :y1="MARGIN.t"
+                  :y2="MARGIN.t + innerH"
+                  stroke="var(--sf-line)"
+                  stroke-opacity="0.7"
+                />
+                <text
+                  :x="safetyX(xt)"
+                  :y="plotH - 7"
+                  text-anchor="middle"
+                  fill="var(--sf-muted)"
+                  font-size="10"
+                  class="sf-mono"
+                >
+                  {{ xt }}%
+                </text>
+              </g>
+
+              <line
+                :x1="safetyX(MIN_COVER)"
+                :x2="safetyX(MIN_COVER)"
+                :y1="MARGIN.t"
+                :y2="MARGIN.t + innerH"
+                stroke="var(--sf-danger)"
+                stroke-dasharray="2 4"
+                stroke-opacity="0.55"
+              />
+
+              <g>
+                <line
+                  :x1="safetyX(coverage)"
+                  :x2="safetyX(coverage)"
+                  :y1="MARGIN.t"
+                  :y2="MARGIN.t + innerH"
+                  stroke="var(--sf-cobalt)"
+                  stroke-width="1.35"
+                  stroke-dasharray="4 3"
+                />
+                <text
+                  :x="safetyX(coverage) + 5"
+                  :y="MARGIN.t + 11"
+                  fill="var(--sf-cobalt)"
+                  font-size="10"
+                  font-weight="600"
+                  class="sf-mono"
+                >
+                  ≥ {{ coverage }}%
+                </text>
+              </g>
+
+              <g v-if="safetyData.refBidBps != null">
+                <line
+                  :x1="MARGIN.l"
+                  :x2="MARGIN.l + innerW"
+                  :y1="safetyY(safetyData.refBidBps / 100)"
+                  :y2="safetyY(safetyData.refBidBps / 100)"
+                  stroke="var(--sf-bid)"
+                  stroke-width="1.25"
+                  stroke-dasharray="5 4"
+                />
+                <text
+                  :x="MARGIN.l + innerW - 5"
+                  :y="safetyY(safetyData.refBidBps / 100) - 5"
+                  text-anchor="end"
+                  fill="var(--sf-bid)"
+                  font-size="10"
+                  font-weight="600"
+                  class="sf-mono"
+                >
+                  Bid {{ formatApr(safetyData.refBidBps) }}
+                </text>
+              </g>
+
+              <g
+                v-for="pt in safetyData.pts"
+                :key="pt.id"
+                class="sf-rb-safety-dot cursor-pointer"
+                :class="{ 'is-selected': selectedId === pt.id }"
+                :style="{ '--dot-tone': kindColor(pt.kind) }"
+                @pointerenter="hoveredSafetyId = pt.id"
+                @pointerleave="hoveredSafetyId = null"
+                @click="emit('select-ask', pt.id)"
+              >
+                <circle :cx="safetyX(pt.cov)" :cy="safetyY(pt.apr)" r="11" fill="transparent" />
+                <circle
+                  v-if="selectedId === pt.id || hoveredSafetyId === pt.id"
+                  class="sf-rb-dot-halo"
+                  :cx="safetyX(pt.cov)"
+                  :cy="safetyY(pt.apr)"
+                  :r="pt.r + 3"
+                  :fill="kindColor(pt.kind)"
+                  fill-opacity="0.22"
+                />
+                <circle
+                  class="sf-rb-dot-core"
+                  :cx="safetyX(pt.cov)"
+                  :cy="safetyY(pt.apr)"
+                  :r="pt.r"
+                  :fill="pt.ok ? kindColor(pt.kind) : 'var(--sf-card)'"
+                  :stroke="pt.ok ? 'var(--sf-card)' : kindColor(pt.kind)"
+                  :stroke-width="selectedId === pt.id ? 1.5 : 1.3"
+                  fill-opacity="0.92"
+                />
+              </g>
+            </svg>
+
+            <div
+              v-if="hoveredSafetyPoint"
+              class="sf-popover pointer-events-none absolute right-3 top-3 z-20 w-48 rounded-xl px-2.5 py-2 text-[11px]"
+            >
+              <div
+                class="sf-mono flex items-center justify-between border-b border-[color:var(--sf-line)] pb-1 font-semibold text-[color:var(--sf-ink)]"
+              >
+                <span>{{ kindLabel(hoveredSafetyPoint.kind) }}</span>
+                <span class="text-[color:var(--sf-ask)]">
+                  {{ formatApr(hoveredSafetyPoint.yieldBps) }}
                 </span>
               </div>
-              <div v-if="hoveredSafetyPoint.ratio" class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Liquidates</span>
-                <span>&lt; {{ hoveredSafetyPoint.ratio }}%</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Size</span>
-                <span>{{ formatMarketAmount(hoveredSafetyPoint.cost, market) }}</span>
-              </div>
-              <div class="flex justify-between">
-                <span class="text-[color:var(--sf-muted)]">Maturity</span>
-                <span>{{ formatDur(hoveredSafetyPoint.d, unit) }}</span>
+              <div class="sf-mono mt-1.5 space-y-0.5">
+                <div class="flex justify-between">
+                  <span class="text-[color:var(--sf-muted)]">Cover</span>
+                  <span class="font-semibold text-[color:var(--sf-bid)]">
+                    {{ Math.round(hoveredSafetyPoint.cov) }}%
+                  </span>
+                </div>
+                <div v-if="hoveredSafetyPoint.ratio" class="flex justify-between">
+                  <span class="text-[color:var(--sf-muted)]">Liq</span>
+                  <span>&lt; {{ hoveredSafetyPoint.ratio }}%</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-[color:var(--sf-muted)]">Size</span>
+                  <span>{{ formatMarketAmount(hoveredSafetyPoint.cost, market) }}</span>
+                </div>
+                <div class="flex justify-between">
+                  <span class="text-[color:var(--sf-muted)]">Term</span>
+                  <span>{{ formatDur(hoveredSafetyPoint.d, unit) }}</span>
+                </div>
               </div>
             </div>
           </div>
 
-          <!-- Maturity-rule asks strip (if any) -->
           <div
             v-if="safetyData.maturityAsks.length"
-            class="flex flex-wrap items-center gap-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] px-4 py-2 text-[11px]"
+            class="flex shrink-0 flex-wrap items-center gap-1.5 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] px-3 py-1.5 text-[10.5px]"
           >
-            <span class="sf-mono uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-              Maturity-rule asks:
+            <span class="sf-mono uppercase tracking-[0.08em] text-[color:var(--sf-muted)]">
+              Maturity-rule:
             </span>
             <button
               v-for="ma in safetyData.maturityAsks"
               :key="ma.id"
               type="button"
-              class="sf-mono rounded-md border border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-2 py-0.5 text-[color:var(--sf-ink)] hover:border-cobalt-600"
+              class="sf-mono rounded-[5px] border border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-2 py-0.5 text-[color:var(--sf-ink)] transition-colors hover:border-[color:var(--sf-line-cobalt)]"
               @click="emit('select-ask', ma.id)"
             >
               {{ formatApr(ma.quote?.yieldBps) }} · {{ formatCompact(ma.quote?.cost) }} {{ market }}
@@ -1603,44 +1741,47 @@ const historyEmptyTitle = computed(() => {
       <template v-else>
         <div
           v-if="!historyData.count"
-          class="flex h-[368px] flex-col items-center justify-center px-6 text-center"
+          class="relative z-10 flex h-full min-h-[224px] flex-col items-center justify-center px-6 text-center"
         >
           <div
-            class="grid h-11 w-11 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
+            class="grid h-10 w-10 place-items-center rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] text-[color:var(--sf-muted)]"
           >
-            <layers-icon class="h-5 w-5" />
+            <layers-icon class="h-[18px] w-[18px]" />
           </div>
-          <p class="sf-serif mt-3 text-[18px] font-medium text-[color:var(--sf-ink)]">
+          <p class="sf-display mt-2.5 text-[16px] font-semibold text-[color:var(--sf-ink)]">
             {{ historyEmptyTitle }}
-          </p>
-          <p class="mt-1 max-w-sm text-[12.5px] text-[color:var(--sf-muted)]">
-            Confirmed bond executions over the last 10 days plot here with volume histograms and
-            rolling maturity-weighted APR.
           </p>
         </div>
 
-        <div v-else class="relative select-none" :style="{ height: `${PLOT_H}px` }">
+        <div v-else class="relative z-10 h-full w-full select-none">
           <svg
             :width="plotW"
-            :height="PLOT_H"
-            :viewBox="`0 0 ${plotW} ${PLOT_H}`"
+            :height="plotH"
+            :viewBox="`0 0 ${plotW} ${plotH}`"
             class="block h-full w-full cursor-crosshair"
             role="img"
             :aria-label="`${market} 10-day fill history`"
             @pointermove="onHistoryMove"
             @pointerleave="historyHoverX = null"
           >
-            <g v-for="yt in niceTicks(historyData.yDom[0], historyData.yDom[1], 5)" :key="`hy-${yt}`">
+            <g
+              v-for="yt in niceTicks(
+                historyData.yDom[0],
+                historyData.yDom[1],
+                Math.max(3, Math.round(innerH / 56))
+              )"
+              :key="`hy-${yt}`"
+            >
               <line
                 :x1="MARGIN.l"
                 :x2="MARGIN.l + innerW"
                 :y1="histY(yt)"
                 :y2="histY(yt)"
                 stroke="var(--sf-line)"
-                stroke-dasharray="3 4"
+                stroke-dasharray="3 5"
               />
               <text
-                :x="MARGIN.l - 8"
+                :x="MARGIN.l - 7"
                 :y="histY(yt) + 3.5"
                 text-anchor="end"
                 fill="var(--sf-muted)"
@@ -1658,20 +1799,26 @@ const historyEmptyTitle = computed(() => {
                 :y1="MARGIN.t"
                 :y2="MARGIN.t + innerH"
                 stroke="var(--sf-line)"
+                stroke-opacity="0.7"
               />
               <text
                 :x="histX(xt)"
-                :y="PLOT_H - 9"
+                :y="plotH - 7"
                 text-anchor="middle"
                 fill="var(--sf-muted)"
                 font-size="10"
                 class="sf-mono"
               >
-                {{ xt === 0 ? "now" : unit === "blocks" ? `−${formatCompact(-xt * DAY_BLOCKS)}` : `${xt}d` }}
+                {{
+                  xt === 0
+                    ? "now"
+                    : unit === "blocks"
+                      ? `−${formatCompact(-xt * DAY_BLOCKS)}`
+                      : `${xt}d`
+                }}
               </text>
             </g>
 
-            <!-- Volume Histogram -->
             <g opacity="0.28">
               <rect
                 v-for="(bar, idx) in historyData.bars"
@@ -1685,7 +1832,6 @@ const historyEmptyTitle = computed(() => {
               />
             </g>
 
-            <!-- Weighted Avg Line -->
             <path
               v-if="histAvgPath"
               :d="histAvgPath"
@@ -1695,7 +1841,6 @@ const historyEmptyTitle = computed(() => {
               stroke-linecap="round"
             />
 
-            <!-- Fill Dots -->
             <circle
               v-for="dot in historyData.dots"
               :key="dot.id"
@@ -1706,7 +1851,6 @@ const historyEmptyTitle = computed(() => {
               :fill-opacity="dot.opacity"
             />
 
-            <!-- Hover Line -->
             <line
               v-if="historyReadout"
               :x1="historyReadout.px"
@@ -1719,13 +1863,13 @@ const historyEmptyTitle = computed(() => {
 
           <div
             v-if="historyReadout"
-            class="sf-plate pointer-events-none absolute top-3 z-20 w-44 rounded-xl px-3 py-2 text-[11px]"
+            class="sf-popover pointer-events-none absolute top-2.5 z-20 w-40 rounded-xl px-2.5 py-2 text-[11px]"
             :style="{ left: `${historyReadout.left}px` }"
           >
             <div class="sf-mono border-b border-[color:var(--sf-line)] pb-1 font-semibold">
               {{ historyReadout.agoText }} ago
             </div>
-            <div class="sf-mono mt-1.5 space-y-1">
+            <div class="sf-mono mt-1 space-y-0.5">
               <div class="flex justify-between">
                 <span class="text-[color:var(--sf-muted)]">Fills</span>
                 <span class="font-semibold">{{ historyReadout.count }}</span>
@@ -1742,86 +1886,160 @@ const historyEmptyTitle = computed(() => {
       </template>
     </div>
 
-    <!-- Bottom Legend & Inline Overlay Toggles -->
+    <!-- Compact Legend & Inline Layer Toggles -->
     <div
-      class="flex flex-wrap items-center justify-between gap-3 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] px-4 py-2.5 text-[11px] text-[color:var(--sf-muted)] sm:px-5"
+      class="flex shrink-0 flex-wrap items-center justify-between gap-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] px-3.5 py-1.5 text-[11px] text-[color:var(--sf-muted)]"
     >
-      <div v-if="lens === 'curve'" class="flex flex-wrap items-center gap-3.5">
+      <div v-if="lens === 'curve'" class="flex flex-wrap items-center gap-3">
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-[2.5px] w-3.5 rounded-full bg-[color:var(--sf-bid)]" />
-          <span>Best bid</span>
+          <span class="h-[2.5px] w-3 rounded-full bg-[color:var(--sf-bid)]" />
+          <span>Bid</span>
         </span>
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-[2.5px] w-3.5 rounded-full bg-[color:var(--sf-ask)]" />
-          <span>Best ask</span>
-        </span>
-        <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-ask)]" />
-          <span>Asks (click to inspect)</span>
+          <span class="h-[2.5px] w-3 rounded-full bg-[color:var(--sf-ask)]" />
+          <span>Ask</span>
         </span>
 
-        <label class="inline-flex cursor-pointer items-center gap-1.5 hover:text-[color:var(--sf-ink)]">
-          <input
-            type="checkbox"
-            :checked="showOffers"
-            class="h-3.5 w-3.5 rounded accent-cobalt-600"
-            @change="emit('update:showOffers', ($event.target as HTMLInputElement).checked)"
-          />
-          <span>Every bid curve</span>
-        </label>
+        <button
+          type="button"
+          :aria-pressed="showOffers"
+          class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-medium transition-all"
+          :class="
+            showOffers
+              ? 'border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
+              : 'border-[color:var(--sf-line)] bg-[color:var(--sf-card)] text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
+          "
+          @click="emit('update:showOffers', !showOffers)"
+        >
+          <span>All bids</span>
+        </button>
 
-        <label class="inline-flex cursor-pointer items-center gap-1.5 hover:text-[color:var(--sf-ink)]">
-          <input
-            type="checkbox"
-            :checked="showFills"
-            class="h-3.5 w-3.5 rounded accent-cobalt-600"
-            @change="emit('update:showFills', ($event.target as HTMLInputElement).checked)"
-          />
-          <span>Fills · 10d</span>
-        </label>
+        <button
+          type="button"
+          :aria-pressed="showFills"
+          class="inline-flex items-center gap-1.5 rounded-full border px-2 py-0.5 text-[10.5px] font-medium transition-all"
+          :class="
+            showFills
+              ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
+              : 'border-[color:var(--sf-line)] bg-[color:var(--sf-card)] text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
+          "
+          @click="emit('update:showFills', !showFills)"
+        >
+          <span>10d fills</span>
+        </button>
       </div>
 
-      <div v-else-if="lens === 'matrix'" class="flex flex-wrap items-center gap-3.5">
+      <div v-else-if="lens === 'matrix'" class="flex items-center gap-3">
         <span class="inline-flex items-center gap-1.5">
           <span class="h-2 w-2 rounded-full bg-[color:var(--sf-bid)]" />
-          <span>Offer capital / Best bid</span>
+          <span>Bid / Offers</span>
         </span>
         <span class="inline-flex items-center gap-1.5">
           <span class="h-2 w-2 rounded-full bg-[color:var(--sf-ask)]" />
-          <span>Ask demand / Best ask</span>
+          <span>Ask / Demand</span>
         </span>
       </div>
 
-      <div v-else-if="lens === 'safety'" class="flex flex-wrap items-center gap-3.5">
+      <div v-else-if="lens === 'safety'" class="flex items-center gap-3">
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-ask)]" />
+          <span class="h-2 w-2 rounded-full bg-[color:var(--sf-ask)]" />
           <span>New loan</span>
         </span>
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-cobalt)]" />
-          <span>Resale bond</span>
+          <span class="h-2 w-2 rounded-full bg-[color:var(--sf-cobalt)]" />
+          <span>Resale</span>
         </span>
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-bid)]" />
+          <span class="h-2 w-2 rounded-full bg-[color:var(--sf-bid)]" />
           <span>Shares</span>
         </span>
       </div>
 
-      <div v-else class="flex flex-wrap items-center gap-3.5">
+      <div v-else class="flex items-center gap-3">
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-bid)]" />
-          <span>New loans</span>
+          <span class="h-2 w-2 rounded-full bg-[color:var(--sf-bid)]" />
+          <span>New</span>
         </span>
         <span class="inline-flex items-center gap-1.5">
-          <span class="h-2.5 w-2.5 rounded-full bg-[color:var(--sf-ask)]" />
-          <span>Resale &amp; shares</span>
+          <span class="h-2 w-2 rounded-full bg-[color:var(--sf-ask)]" />
+          <span>Resale / Shares</span>
         </span>
       </div>
 
-      <span v-if="curves" class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-        {{ curves.searched.bids }}/{{ curves.searched.bidTotal }} bids ·
-        {{ curves.searched.asks }}/{{ curves.searched.askTotal }} asks
+      <span v-if="curves" class="sf-mono text-[10px] text-[color:var(--sf-dim)]">
+        {{ curves.searched.bids }}/{{ curves.searched.bidTotal }}b ·
+        {{ curves.searched.asks }}/{{ curves.searched.askTotal }}a
       </span>
     </div>
   </section>
 </template>
+
+<style scoped>
+.plot-bloom {
+  background:
+    radial-gradient(
+      ellipse 55% 45% at 78% 12%,
+      rgba(var(--sf-cobalt-rgb), 0.08),
+      transparent 72%
+    ),
+    radial-gradient(
+      ellipse 45% 42% at 20% 85%,
+      rgba(var(--sf-bid-rgb), 0.06),
+      transparent 72%
+    );
+}
+
+.curve-glow-bid {
+  filter: drop-shadow(0 0 6px var(--sf-bid-glow));
+}
+
+.curve-glow-ask {
+  filter: drop-shadow(0 0 5px var(--sf-ask-glow));
+}
+
+.ask-dot-node circle {
+  transition:
+    r 0.18s var(--sf-spring),
+    fill-opacity 0.16s ease;
+}
+
+.matrix-cell:active {
+  transform: scale(0.985);
+}
+</style>
+
+<style>
+/* Light mode: crisp matching precision ring around selected ask dots instead of thick cobalt halo */
+.sf-rb-ask-dot.is-selected .sf-rb-dot-halo,
+.sf-rb-safety-dot.is-selected .sf-rb-dot-halo {
+  fill: var(--dot-tone);
+  fill-opacity: 0.1;
+  stroke: var(--dot-tone);
+  stroke-width: 1.35;
+  stroke-opacity: 0.88;
+}
+
+/* Dark mode: preserve the luminous cobalt reticle highlight unchanged */
+:root[data-theme="dark"] .sf-rb-ask-dot.is-selected .sf-rb-dot-halo {
+  fill: var(--sf-cobalt);
+  fill-opacity: 0.24;
+  stroke: none;
+}
+
+:root[data-theme="dark"] .sf-rb-ask-dot.is-selected .sf-rb-dot-core {
+  fill: var(--sf-card);
+  stroke: var(--sf-cobalt);
+  stroke-width: 2.1;
+}
+
+:root[data-theme="dark"] .sf-rb-safety-dot.is-selected .sf-rb-dot-halo {
+  fill: var(--sf-cobalt);
+  fill-opacity: 0.22;
+  stroke: none;
+}
+
+:root[data-theme="dark"] .sf-rb-safety-dot.is-selected .sf-rb-dot-core {
+  stroke: var(--sf-ink);
+  stroke-width: 2;
+}
+</style>

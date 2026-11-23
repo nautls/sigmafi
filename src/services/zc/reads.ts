@@ -29,11 +29,9 @@ import {
 } from "./contracts";
 import { simulateDraft } from "./drafts";
 import { ZcApiError } from "./errors";
-import {
-  ChainTransaction,
-  DEFAULT_MAINNET_GRAPHQL_URL,
-  ZcGraphqlClient
-} from "./graphqlClient";
+import { ChainTransaction, ZcChainClient } from "./chainClient";
+import { DEFAULT_MAINNET_EXPLORER_URL, ZcExplorerClient } from "./explorerClient";
+import { DEFAULT_MAINNET_GRAPHQL_URL, ZcGraphqlClient } from "./graphqlClient";
 import { buildAtMeta, toSafeNum, ZcJson, ZcKnown, ZcStanding } from "./json";
 import {
   buildMarketBook,
@@ -289,8 +287,11 @@ function searchedJson(sr: ZcSearched, here: number): Record<string, number> {
   };
 }
 
+export type ZcChainTransport = "explorer" | "graphql";
+
 export class ZcGraphqlEngine {
-  readonly gql: ZcGraphqlClient;
+  private transport: ZcChainTransport;
+  private client: ZcChainClient;
   readonly resolver: ZcResolver;
   private walletProvider: ZcWalletProvider = () => EMPTY_WALLET;
   private snapshot: SnapshotState | null = null;
@@ -298,19 +299,47 @@ export class ZcGraphqlEngine {
   private inFlightRefresh: Promise<SnapshotState> | null = null;
   private fillsCache = new Map<string, RawFill[]>();
 
-  constructor(endpoint = DEFAULT_MAINNET_GRAPHQL_URL) {
-    this.gql = new ZcGraphqlClient(endpoint);
-    this.resolver = new ZcResolver(this.gql);
+  constructor(
+    endpoint = DEFAULT_MAINNET_EXPLORER_URL,
+    transport: ZcChainTransport = "explorer"
+  ) {
+    this.transport = transport;
+    this.client =
+      transport === "graphql"
+        ? new ZcGraphqlClient(endpoint || DEFAULT_MAINNET_GRAPHQL_URL)
+        : new ZcExplorerClient(endpoint || DEFAULT_MAINNET_EXPLORER_URL);
+    this.resolver = new ZcResolver(() => this.client);
+  }
+
+  get gql(): ZcChainClient {
+    return this.client;
+  }
+
+  getTransport(): ZcChainTransport {
+    return this.transport;
   }
 
   getEndpoint(): string {
-    return this.gql.getEndpoint();
+    return this.client.getEndpoint();
+  }
+
+  setTransport(transport: ZcChainTransport, endpoint: string): void {
+    const fallback =
+      transport === "graphql" ? DEFAULT_MAINNET_GRAPHQL_URL : DEFAULT_MAINNET_EXPLORER_URL;
+    const clean = endpoint.trim() || fallback;
+    if (transport === this.transport && clean === this.client.getEndpoint()) return;
+    this.transport = transport;
+    this.client =
+      transport === "graphql" ? new ZcGraphqlClient(clean) : new ZcExplorerClient(clean);
+    this.reset();
   }
 
   setEndpoint(url: string): void {
-    const clean = url.trim() || DEFAULT_MAINNET_GRAPHQL_URL;
-    if (clean === this.gql.getEndpoint()) return;
-    this.gql.setEndpoint(clean);
+    const fallback =
+      this.transport === "graphql" ? DEFAULT_MAINNET_GRAPHQL_URL : DEFAULT_MAINNET_EXPLORER_URL;
+    const clean = url.trim() || fallback;
+    if (clean === this.client.getEndpoint()) return;
+    this.client.setEndpoint(clean);
     this.reset();
   }
 
@@ -962,18 +991,22 @@ export class ZcGraphqlEngine {
 
     let lo: bigint;
     let hi: bigint;
+    let anchor: bigint;
     if (params?.to != null && params?.around == null && params.to >= 720) {
       lo = 720n;
       hi = BigInt(Math.round(params.to));
+      anchor = hi;
     } else if (params?.to == null && params?.around != null && params.around > 0) {
       const a = BigInt(Math.round(params.around));
       const b =
         params.band != null ? BigInt(Math.round(params.band)) : bigMax(720n, a / 10n);
       lo = bigMax(1n, a - b);
       hi = a + b;
+      anchor = a;
     } else if (params?.to == null && params?.around == null) {
       lo = 720n;
       hi = BLOCKS_PER_YEAR;
+      anchor = hi;
     } else {
       throw new ZcApiError("give either to (at least 720) or around, not both", 400);
     }
@@ -982,6 +1015,134 @@ export class ZcGraphqlEngine {
     const matcher = this.buildMatcher(snap.book);
     const json = new ZcJson(matcher, known);
     const h = BigInt(snap.book.height);
+
+    // Evaluate eligible lend offers first so every ask can be compared against the
+    // bid envelope at its own maturity (same-maturity spread, never cross-maturity).
+    const eligibleOffers: {
+      open: ZcOpen<ZcOffer>;
+      standing: ZcStanding;
+      curve: ReturnType<typeof offerCurve>;
+      a: bigint;
+      b: bigint;
+    }[] = [];
+
+    for (const o of snap.book.offers) {
+      if (o.record.market !== m) continue;
+      const st = json.offerStanding(o.record);
+      if (f.matchable && !st.ok) continue;
+      if (floorBps(o.record) > f.coverage) continue;
+      if (maxBlocks(o.record) < lo || minBlocks(o.record) > hi) continue;
+      eligibleOffers.push({
+        open: o,
+        standing: st,
+        curve: offerCurve(o.record),
+        a: bigMax(lo, minBlocks(o.record)),
+        b: bigMin(hi, maxBlocks(o.record))
+      });
+    }
+
+    // Best bid APR across eligible offers at an exact maturity `d` (blocks left).
+    const bestBidAt = (d: bigint): bigint | null => {
+      let best: bigint | null = null;
+      for (const eo of eligibleOffers) {
+        if (d < minBlocks(eo.open.record) || d > maxBlocks(eo.open.record)) continue;
+        const y = eo.curve.bpsAt(d);
+        if (best === null || y < best) best = y;
+      }
+      return best;
+    };
+
+    const bids: {
+      boxId: string;
+      bps: number;
+      minBps: number;
+      maxBps: number;
+      bpsBig: bigint;
+      size: string;
+      range: [number, number];
+      ok: boolean;
+      reason: string | null;
+    }[] = [];
+
+    for (const eo of eligibleOffers) {
+      const o = eo.open;
+      const pts: bigint[] = [eo.a, eo.b];
+      for (const [, d] of o.record.curve) {
+        if (d >= eo.a && d <= eo.b) pts.push(d);
+      }
+      let minY = eo.curve.bpsAt(pts[0]);
+      let maxY = minY;
+      for (const d of pts.slice(1)) {
+        const y = eo.curve.bpsAt(d);
+        if (y < minY) minY = y;
+        if (y > maxY) maxY = y;
+      }
+      const refD = bigMin(eo.b, bigMax(eo.a, anchor));
+      const atY = eo.curve.bpsAt(refD);
+      bids.push({
+        boxId: o.boxId,
+        bps: toSafeNum(atY),
+        minBps: toSafeNum(minY),
+        maxBps: toSafeNum(maxY),
+        bpsBig: atY,
+        size: o.record.capital.toString(),
+        range: [toSafeNum(eo.a), toSafeNum(eo.b)],
+        ok: eo.standing.ok,
+        reason: eo.standing.reasons[0] ?? null
+      });
+    }
+
+    bids.sort((a, b) => cmpBigAsc(a.bpsBig, b.bpsBig) || cmpStr(a.boxId, b.boxId));
+    const trimmedBids = bids.slice(0, MAX_BOOK_ROWS).map(({ bpsBig: _ignored, ...rest }) => rest);
+
+    // Helper: find tightest pointwise same-maturity spread for a window order within [lo, hi]
+    const bestWindowSpread = (
+      o: ZcOrder
+    ): { blocks: bigint; bidBps: bigint; askBps: bigint; gap: bigint } | null => {
+      const win = orderWindow(o);
+      const c = borrowCurve(o);
+      if (!win || !c || eligibleOffers.length === 0) return null;
+      const at = h + 1n;
+      const from = bigMax(h + win[0], at + lo);
+      const until = bigMin(h + win[1], at + hi);
+      if (from > until) return null;
+
+      const cands = new Set<bigint>([from, until]);
+      for (const d of c.breakpoints) {
+        const x = h + d;
+        if (x >= from && x <= until) cands.add(x);
+      }
+      for (const eo of eligibleOffers) {
+        const loM = at + eo.a;
+        const hiM = at + eo.b;
+        if (loM >= from && loM <= until) cands.add(loM);
+        if (hiM >= from && hiM <= until) cands.add(hiM);
+        for (const [, d] of eo.open.record.curve) {
+          const x = at + d;
+          if (x >= from && x <= until) cands.add(x);
+        }
+      }
+      for (const g of gridBetween(from, until)) cands.add(g);
+
+      let best: { blocks: bigint; bidBps: bigint; askBps: bigint; gap: bigint } | null = null;
+      for (const mat of cands) {
+        const blocks = mat - at;
+        const bidAt = bestBidAt(blocks);
+        if (bidAt === null) continue;
+        const pRes = resolvePrincipal(o, h, mat);
+        if (!pRes.ok) continue;
+        const askY = yieldBps(o.repayment, pRes.value, blocks) ?? 0n;
+        const gap = bidAt - askY;
+        if (
+          !best ||
+          gap < best.gap ||
+          (gap === best.gap && (askY > best.askBps || (askY === best.askBps && blocks < best.blocks)))
+        ) {
+          best = { blocks, bidBps: bidAt, askBps: askY, gap };
+        }
+      }
+      return best;
+    };
 
     const rows = this.buildAskRows(snap, matcher, json, known, m).filter((r) =>
       this.keepAskRow(r, f, null, null)
@@ -998,12 +1159,31 @@ export class ZcGraphqlEngine {
       ok: boolean;
       reason: string | null;
       borrowedByMe: boolean;
+      bidAtBps: number | null;
+      spreadBps: number | null;
     }[] = [];
+
+    let tightest: { blocks: bigint; bidBps: bigint; askBps: bigint; gap: bigint } | null = null;
+    const considerSpread = (blocks: bigint, bidBps: bigint, askBps: bigint) => {
+      const gap = bidBps - askBps;
+      if (
+        !tightest ||
+        gap < tightest.gap ||
+        (gap === tightest.gap &&
+          (askBps > tightest.askBps || (askBps === tightest.askBps && blocks < tightest.blocks)))
+      ) {
+        tightest = { blocks, bidBps, askBps, gap };
+      }
+    };
 
     for (const r of rows) {
       if (r.open.record.recordType === "order" && isWindowOrder(r.open.record)) {
         const wq = this.bestWindowQuote(r.open.record, h, lo, hi);
         if (wq) {
+          const ws = bestWindowSpread(r.open.record);
+          if (ws) considerSpread(ws.blocks, ws.bidBps, ws.askBps);
+          const bidAtRow = ws ? ws.bidBps : bestBidAt(wq.blocks);
+          const rowGap = ws ? ws.gap : bidAtRow !== null ? bidAtRow - wq.bps : null;
           asks.push({
             boxId: r.open.boxId,
             kind: r.kind,
@@ -1014,10 +1194,18 @@ export class ZcGraphqlEngine {
             window: true,
             ok: r.standing.ok,
             reason: r.standing.reasons[0] ?? null,
-            borrowedByMe: r.borrowedByMe
+            borrowedByMe: r.borrowedByMe,
+            bidAtBps: bidAtRow !== null ? toSafeNum(bidAtRow) : null,
+            spreadBps: rowGap !== null ? toSafeNum(rowGap) : null
           });
         }
       } else if (r.blocksLeft !== null && r.blocksLeft >= lo && r.blocksLeft <= hi) {
+        const bidAtRow = bestBidAt(r.blocksLeft);
+        const rowGap =
+          bidAtRow !== null && r.yieldBps !== null ? bidAtRow - r.yieldBps : null;
+        if (bidAtRow !== null && r.yieldBps !== null) {
+          considerSpread(r.blocksLeft, bidAtRow, r.yieldBps);
+        }
         asks.push({
           boxId: r.open.boxId,
           kind: r.kind,
@@ -1028,7 +1216,9 @@ export class ZcGraphqlEngine {
           window: false,
           ok: r.standing.ok,
           reason: r.standing.reasons[0] ?? null,
-          borrowedByMe: r.borrowedByMe
+          borrowedByMe: r.borrowedByMe,
+          bidAtBps: bidAtRow !== null ? toSafeNum(bidAtRow) : null,
+          spreadBps: rowGap !== null ? toSafeNum(rowGap) : null
         });
       }
     }
@@ -1036,57 +1226,25 @@ export class ZcGraphqlEngine {
     asks.sort((a, b) => cmpBigDesc(a.bpsBig, b.bpsBig) || cmpStr(a.boxId, b.boxId));
     const trimmedAsks = asks.slice(0, MAX_BOOK_ROWS).map(({ bpsBig: _ignored, ...rest }) => rest);
 
-    const bids: {
-      boxId: string;
-      bps: number;
-      bpsBig: bigint;
-      size: string;
-      range: [number, number];
-      ok: boolean;
-      reason: string | null;
-    }[] = [];
-
-    for (const o of snap.book.offers) {
-      if (o.record.market !== m) continue;
-      const st = json.offerStanding(o.record);
-      if (f.matchable && !st.ok) continue;
-      if (floorBps(o.record) > f.coverage) continue;
-      if (maxBlocks(o.record) < lo || minBlocks(o.record) > hi) continue;
-
-      const a = bigMax(lo, minBlocks(o.record));
-      const b = bigMin(hi, maxBlocks(o.record));
-      const curve = offerCurve(o.record);
-      const pts: bigint[] = [a, b];
-      for (const [, d] of o.record.curve) {
-        if (d >= a && d <= b) pts.push(d);
-      }
-      let minY = curve.bpsAt(pts[0]);
-      for (const d of pts.slice(1)) {
-        const y = curve.bpsAt(d);
-        if (y < minY) minY = y;
-      }
-      bids.push({
-        boxId: o.boxId,
-        bps: toSafeNum(minY),
-        bpsBig: minY,
-        size: o.record.capital.toString(),
-        range: [toSafeNum(a), toSafeNum(b)],
-        ok: st.ok,
-        reason: st.reasons[0] ?? null
-      });
-    }
-
-    bids.sort((a, b) => cmpBigAsc(a.bpsBig, b.bpsBig) || cmpStr(a.boxId, b.boxId));
-    const trimmedBids = bids.slice(0, MAX_BOOK_ROWS).map(({ bpsBig: _ignored, ...rest }) => rest);
-
     let bestAsk: number | null = null;
     for (const a of trimmedAsks) {
       if (a.bps !== null && (bestAsk === null || a.bps > bestAsk)) bestAsk = a.bps;
     }
-    let bestBid: number | null = null;
-    for (const b of trimmedBids) {
-      if (bestBid === null || b.bps < bestBid) bestBid = b.bps;
+    const anchorBidBig = bestBidAt(anchor);
+    const anchorBid = anchorBidBig !== null ? toSafeNum(anchorBidBig) : null;
+    let bestBid: number | null = anchorBid;
+    if (bestBid === null) {
+      for (const b of trimmedBids) {
+        if (bestBid === null || b.bps < bestBid) bestBid = b.bps;
+      }
     }
+
+    const spreadInfo = tightest as {
+      blocks: bigint;
+      bidBps: bigint;
+      askBps: bigint;
+      gap: bigint;
+    } | null;
 
     return {
       at: buildAtMeta(snap.book),
@@ -1097,11 +1255,16 @@ export class ZcGraphqlEngine {
         grid: f.grid
       },
       range: { from: toSafeNum(lo), to: toSafeNum(hi) },
+      anchorBlocks: toSafeNum(anchor),
+      anchorBidBps: anchorBid,
       asks: trimmedAsks,
       bids: trimmedBids,
       bestAskBps: bestAsk,
       bestBidBps: bestBid,
-      spreadBps: bestAsk !== null && bestBid !== null ? bestBid - bestAsk : null
+      spreadBps: spreadInfo ? toSafeNum(spreadInfo.gap) : null,
+      spreadBlocks: spreadInfo ? toSafeNum(spreadInfo.blocks) : null,
+      spreadBidBps: spreadInfo ? toSafeNum(spreadInfo.bidBps) : null,
+      spreadAskBps: spreadInfo ? toSafeNum(spreadInfo.askBps) : null
     };
   }
 

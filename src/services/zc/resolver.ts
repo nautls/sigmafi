@@ -10,7 +10,7 @@ import {
   ZcOrigin,
   ZcRecord
 } from "./boxes";
-import { ChainTransaction, GraphqlTokenInfo, ZcGraphqlClient } from "./graphqlClient";
+import { ChainTransaction, GraphqlTokenInfo, ZcChainClient } from "./chainClient";
 import { ZcMarketBook } from "./matcher";
 
 const RETRY_BLOCKS = 30;
@@ -87,7 +87,11 @@ export class ZcResolver {
   private readonly missing = new Map<string, number>();
   private _generation = 0;
 
-  constructor(private readonly gql: ZcGraphqlClient) {}
+  constructor(private readonly getClient: () => ZcChainClient) {}
+
+  private get gql(): ZcChainClient {
+    return this.getClient();
+  }
 
   get generation(): number {
     return this._generation;
@@ -384,10 +388,18 @@ export class ZcResolver {
       ...Array.from(book.bonds.values()).map((x) => x.record)
     ];
 
-    // Step 1: resolve origins & chain roots in parallel
+    // Step 1: resolve origins & chain roots in parallel (fail-soft on flaky endpoints)
+    const soft = async (p: Promise<void>) => {
+      try {
+        await p;
+      } catch (err) {
+        if (signal?.aborted || (err as Error)?.name === "AbortError") throw err;
+      }
+    };
+
     await Promise.all([
-      this.resolveOrigins(originIds, height, signal),
-      this.resolveChainRoots(chainRecords, height, signal)
+      soft(this.resolveOrigins(originIds, height, signal)),
+      soft(this.resolveChainRoots(chainRecords, height, signal))
     ]);
 
     // Step 2: if any newly learned share mint holds a bond asset whose origin is unknown, resolve it too
@@ -401,9 +413,9 @@ export class ZcResolver {
 
     // Step 3: resolve script disclosures (after origins so bond fill txs are known) + any secondary origins
     await Promise.all([
-      this.resolveDisclosures(disclosureRecords, height, signal),
+      soft(this.resolveDisclosures(disclosureRecords, height, signal)),
       secondPassOrigins.length > 0
-        ? this.resolveOrigins(secondPassOrigins, height, signal)
+        ? soft(this.resolveOrigins(secondPassOrigins, height, signal))
         : Promise.resolve()
     ]);
   }

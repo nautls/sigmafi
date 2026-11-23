@@ -2,20 +2,27 @@ import { ErgoAddress } from "@fleet-sdk/core";
 import { blake2b256, hex } from "@fleet-sdk/crypto";
 import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, reactive, ref, watch } from "vue";
+import { useChainStore } from "./chainStore";
 import { useWalletStore } from "./walletStore";
 import { ERG_TOKEN_ID } from "@/constants";
+import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
+  adaptPortfolio,
+  getDefaultZcExplorerUrl,
   getDefaultZcGraphqlUrl,
   getZcBaseUrl,
   getZcDataSource,
+  getZcExplorerUrl,
   getZcGraphqlUrl,
   resetZcEngine,
   setZcBaseUrl,
   setZcDataSource,
+  setZcExplorerUrl,
   setZcGraphqlUrl,
   setZcWalletProvider,
   zcApi,
-  ZcDataSource
+  ZcDataSource,
+  ZcTokenMeta
 } from "@/services/zcApi";
 import {
   ZcAuctionLotSummary,
@@ -23,13 +30,18 @@ import {
   ZcDurationUnit,
   ZcInfoResponse,
   ZcMarket,
-  ZcMarketSnapshot
+  ZcMarketSnapshot,
+  ZcPortfolioState,
+  ZcWalletToken
 } from "@/types/zc";
 import {
   bestAskOverall,
   bestBidOverall,
   DEFAULT_COVER,
-  setChainNowAnchor
+  fromRaw,
+  isHex64,
+  setChainNowAnchor,
+  SIGUSD_TOKEN_ID
 } from "@/utils/zcMath";
 
 const MARKET_STORAGE_KEY = "sigmafi.zc.market";
@@ -66,6 +78,9 @@ function emptySnapshot(market: ZcMarket): ZcMarketSnapshot {
 
 export const useZcStore = defineStore("zc", () => {
   const wallet = useWalletStore();
+  const chain = useChainStore();
+
+  const VERIFIED_MAP = new Map(VERIFIED_ASSETS.map((a) => [a.tokenId.toLowerCase(), a.metadata]));
 
   const connected = ref(false);
   const loading = ref(true);
@@ -77,9 +92,13 @@ export const useZcStore = defineStore("zc", () => {
   const revision = ref(0);
   const refreshSeq = ref(0);
   const dataSource = ref<ZcDataSource>(getZcDataSource());
+  const explorerUrl = ref(getZcExplorerUrl());
+  const defaultExplorerUrl = getDefaultZcExplorerUrl();
   const graphqlUrl = ref(getZcGraphqlUrl());
   const defaultGraphqlUrl = getDefaultZcGraphqlUrl();
   const baseUrl = ref(getZcBaseUrl());
+  const searchQuery = ref("");
+  const pendingSelect = ref<{ seq: number; type: "ask" | "bid"; id: string } | null>(null);
   const defaults = ref<Record<string, string | number>>({});
 
   // Wire Nautilus wallet addresses & balances into the client-side GraphQL ZC engine
@@ -147,6 +166,104 @@ export const useZcStore = defineStore("zc", () => {
   const lots = ref<ZcAuctionLotSummary[]>([]);
   const vaults = ref<ZcAuctionVaultSummary[]>([]);
 
+  const portfolio = reactive<ZcPortfolioState>({
+    loaded: false,
+    loading: false,
+    walletErg: 0,
+    walletSigUsd: 0,
+    walletTokens: [],
+    positions: [],
+    openOrders: [],
+    openAsks: [],
+    openOffers: [],
+    wraps: []
+  });
+
+  async function refreshPortfolio() {
+    if (!wallet.connected || !connected.value) {
+      portfolio.loaded = false;
+      portfolio.loading = false;
+      portfolio.walletErg = 0;
+      portfolio.walletSigUsd = 0;
+      portfolio.walletTokens = [];
+      portfolio.positions = [];
+      portfolio.openOrders = [];
+      portfolio.openAsks = [];
+      portfolio.openOffers = [];
+      portfolio.wraps = [];
+      return;
+    }
+    portfolio.loading = true;
+    try {
+      const raw = await zcApi.getPortfolio();
+      const tokenIds = new Set<string>();
+      for (const asset of wallet.balance) {
+        if (asset.tokenId !== ERG_TOKEN_ID && isHex64(asset.tokenId)) {
+          tokenIds.add(asset.tokenId.toLowerCase());
+        }
+      }
+      const tokenMap: Record<string, ZcTokenMeta> = {};
+      if (tokenIds.size > 0) {
+        try {
+          Object.assign(tokenMap, await zcApi.lookupAssets(Array.from(tokenIds).slice(0, 50)));
+        } catch {
+          // fail-soft
+        }
+      }
+      for (const asset of wallet.balance) {
+        if (asset.tokenId === ERG_TOKEN_ID) continue;
+        const low = asset.tokenId.toLowerCase();
+        const meta = asset.metadata || VERIFIED_MAP.get(low);
+        if (meta) {
+          tokenMap[low] = {
+            ...tokenMap[low],
+            id: low,
+            name: tokenMap[low]?.name || meta.name,
+            ticker: tokenMap[low]?.ticker || meta.name,
+            decimals: tokenMap[low]?.decimals ?? meta.decimals,
+            verified: tokenMap[low]?.verified || VERIFIED_MAP.has(low)
+          };
+        }
+      }
+
+      const adapted = adaptPortfolio(raw, tokenMap);
+      // Enrich wallet tokens with live Nautilus USD rates from chainStore when available
+      const enrichedTokens: ZcWalletToken[] = adapted.walletTokens.map((t) => {
+        const rate = chain.priceRates[t.id]?.fiat;
+        const meta = chain.tokensMetadata[t.id] || VERIFIED_MAP.get(t.id);
+        const decimals = t.kind === "receipt" ? 0 : meta?.decimals ?? t.decimals;
+        const amount =
+          t.kind === "receipt" ? t.amount : fromRaw(t.rawAmount, decimals) ?? t.amount;
+        return {
+          ...t,
+          decimals,
+          amount,
+          ticker: t.ticker.endsWith("…") && meta?.name ? meta.name : t.ticker,
+          name: t.name || meta?.name || null,
+          usd: rate && rate > 0 ? rate : t.usd ?? null
+        };
+      });
+
+      // Fallback SigUSD / ERG balance directly from Nautilus if engine hasn't hydrated yet
+      const ergAsset = wallet.balance.find((x) => x.tokenId === ERG_TOKEN_ID);
+      const sigAsset = wallet.balance.find((x) => x.tokenId.toLowerCase() === SIGUSD_TOKEN_ID);
+
+      portfolio.walletErg = ergAsset ? Number(ergAsset.amount) / 1e9 : adapted.walletErg;
+      portfolio.walletSigUsd = sigAsset ? Number(sigAsset.amount) / 100 : adapted.walletSigUsd;
+      portfolio.walletTokens = enrichedTokens;
+      portfolio.positions = adapted.positions;
+      portfolio.openOrders = adapted.openOrders;
+      portfolio.openAsks = adapted.openAsks;
+      portfolio.openOffers = adapted.openOffers;
+      portfolio.wraps = adapted.wraps;
+      portfolio.loaded = true;
+    } catch {
+      // fail-soft
+    } finally {
+      portfolio.loading = false;
+    }
+  }
+
   let pollTimer: number | null = null;
   let inFlight = false;
   let subscribers = 0;
@@ -206,6 +323,13 @@ export const useZcStore = defineStore("zc", () => {
     void poll(true);
   }
 
+  function updateExplorerUrl(url: string) {
+    setZcExplorerUrl(url);
+    explorerUrl.value = getZcExplorerUrl();
+    revision.value = 0;
+    void poll(true);
+  }
+
   function updateGraphqlUrl(url: string) {
     setZcGraphqlUrl(url);
     graphqlUrl.value = getZcGraphqlUrl();
@@ -218,6 +342,10 @@ export const useZcStore = defineStore("zc", () => {
     baseUrl.value = getZcBaseUrl();
     revision.value = 0;
     void poll(true);
+  }
+
+  function requestSelect(type: "ask" | "bid", id: string) {
+    pendingSelect.value = { seq: Date.now(), type, id };
   }
 
   async function fetchMarket(market: ZcMarket) {
@@ -313,6 +441,9 @@ export const useZcStore = defineStore("zc", () => {
         ]);
         lots.value = auctions.lots;
         vaults.value = auctions.vaults;
+        if (wallet.connected) {
+          void refreshPortfolio();
+        }
 
         // If the user hasn't chosen a market yet, highlight whichever market has live activity.
         if (!userPickedMarket.value) {
@@ -330,21 +461,31 @@ export const useZcStore = defineStore("zc", () => {
       connected.value = false;
       loading.value = false;
       const fallbackMsg =
-        dataSource.value === "graphql" ? "Ergo GraphQL unreachable" : "Lithos client unreachable";
+        dataSource.value === "explorer"
+          ? "Ergo Explorer API unreachable"
+          : dataSource.value === "graphql"
+            ? "Ergo GraphQL unreachable"
+            : "Lithos client unreachable";
       error.value = err instanceof Error ? err.message : fallbackMsg;
     } finally {
       inFlight = false;
     }
   }
 
-  // Re-evaluate `mine` / `borrowedByMe` ownership flags when Nautilus connects/disconnects.
+  // Re-evaluate `mine` / `borrowedByMe` ownership flags & portfolio when Nautilus connects/disconnects.
   watch(
-    [() => wallet.connected, () => wallet.changeAddress, () => wallet.usedAddresses.length],
+    [
+      () => wallet.connected,
+      () => wallet.changeAddress,
+      () => wallet.usedAddresses.length,
+      () => wallet.balance.length
+    ],
     () => {
-      if (connected.value && dataSource.value === "graphql") {
+      if (connected.value && dataSource.value !== "lithos") {
         refreshSeq.value += 1;
         void Promise.all([fetchMarket("ERG"), fetchMarket("SigUSD")]).catch(() => undefined);
       }
+      void refreshPortfolio();
     }
   );
 
@@ -377,9 +518,13 @@ export const useZcStore = defineStore("zc", () => {
     revision,
     refreshSeq,
     dataSource,
+    explorerUrl,
+    defaultExplorerUrl,
     graphqlUrl,
     defaultGraphqlUrl,
     baseUrl,
+    searchQuery,
+    pendingSelect,
     defaults,
     oracle,
     activeMarket,
@@ -388,6 +533,7 @@ export const useZcStore = defineStore("zc", () => {
     activeSnapshot,
     lots,
     vaults,
+    portfolio,
     auctionsCount,
     totalOpenOffersUsd,
     totalOpenAsksUsd,
@@ -396,8 +542,11 @@ export const useZcStore = defineStore("zc", () => {
     setActiveMarket,
     setDurationUnit,
     updateDataSource,
+    updateExplorerUrl,
     updateGraphqlUrl,
     updateBaseUrl,
+    requestSelect,
+    refreshPortfolio,
     refresh: () => poll(true),
     start,
     stop

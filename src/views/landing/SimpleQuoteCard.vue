@@ -406,12 +406,12 @@ const ctaLabel = computed(() => {
     if (amount.value) {
       return `Post ${formatMarketAmount(amount.value, market.value)} offer in app`;
     }
-    return `Open ${market.value} Rate Book`;
+    return `Open ${market.value} Yield Curve`;
   }
   if (amount.value) {
     return `Borrow ${formatMarketAmount(amount.value, market.value)} in app`;
   }
-  return `Open ${market.value} Rate Book`;
+  return `Open ${market.value} Yield Curve`;
 });
 </script>
 
@@ -946,13 +946,13 @@ const ctaLabel = computed(() => {
       >
         <shield-icon class="mt-0.5 h-3.5 w-3.5 shrink-0 opacity-75" />
         <span v-if="side === 'lend'">
-          Oracle-guarded bonds at ≥{{ cover }}% cover. Opens the Rate Book with these terms pre-filled.
+          Oracle-guarded bonds at ≥{{ cover }}% cover. Opens the Yield Curve with these terms pre-filled.
         </span>
         <span v-else>
           Locks {{ collAsset }} at {{ cover + 10 }}% starting cover
           <template v-if="liqDistancePct != null">
             ({{ liqDistancePct.toFixed(1) }}% buffer from ${{ oraclePrice.toFixed(3) }})</template
-          >. Opens the Rate Book to review before signing.
+          >. Opens the Yield Curve to review before signing.
         </span>
       </div>
     </div>

@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   ArrowRightIcon,
+  ArrowUpRightIcon,
   CheckCircleIcon,
   CheckIcon,
   CopyIcon,
@@ -23,6 +24,7 @@ import {
   formatDurLong,
   formatMarketAmount,
   formatNumber,
+  GRID_BLOCKS,
   isOracleRefreshingOnly,
   kindLabel,
   lineAt,
@@ -50,28 +52,75 @@ const tab = ref<"quote" | "path" | "risk">("quote");
 const shockPct = ref(0);
 const copied = ref(false);
 const windowPickBlocks = ref<number | null>(null);
+const sharesPct = ref<number>(100);
+const pathHoverIdx = ref<number | null>(null);
 
-watch(
-  () => props.ask.id,
-  () => {
-    tab.value = "quote";
-    shockPct.value = 0;
-    windowPickBlocks.value = null;
-  }
-);
+function resetForAsk() {
+  tab.value = "quote";
+  shockPct.value = 0;
+  windowPickBlocks.value = null;
+  sharesPct.value = props.ask.kind === "shares" ? (props.ask.units / SHARES_UNITS) * 100 : 100;
+  pathHoverIdx.value = null;
+}
+
+watch(() => props.ask.id, resetForAsk, { immediate: true });
+
+function onDockPointerMove(e: MouseEvent) {
+  const el = e.currentTarget as HTMLElement;
+  const r = el.getBoundingClientRect();
+  el.style.setProperty("--spot-x", `${e.clientX - r.left}px`);
+  el.style.setProperty("--spot-y", `${e.clientY - r.top}px`);
+}
 
 const isWindow = computed(() => props.ask.pricing === "window" && !!props.ask.window);
-const activeQuote = computed(() =>
+const isShares = computed(() => props.ask.kind === "shares");
+const isBuyback = computed(() => !!props.ask.borrowedByMe && props.ask.kind !== "order" && !props.ask.owner);
+
+const maxSharesPct = computed(() =>
+  isShares.value ? Math.max(0.01, (props.ask.units / SHARES_UNITS) * 100) : 100
+);
+const minSharesPct = computed(() =>
+  isShares.value ? Math.max(0.01, ((props.ask.minFill || 1) / SHARES_UNITS) * 100) : 100
+);
+const selectedShareUnits = computed(() => {
+  if (!isShares.value) return 1;
+  return Math.round(
+    Math.min(props.ask.units, Math.max(props.ask.minFill || 1, (sharesPct.value / 100) * SHARES_UNITS))
+  );
+});
+const shareFrac = computed(() =>
+  isShares.value && props.ask.units > 0 ? selectedShareUnits.value / props.ask.units : 1
+);
+
+const baseQuote = computed(() =>
   resolvedAskQuote(props.ask, props.height, isWindow.value ? windowPickBlocks.value : null)
 );
 
+const activeQuote = computed(() => {
+  const q = baseQuote.value;
+  if (!q) return null;
+  if (!isShares.value || shareFrac.value === 1) return q;
+  return {
+    ...q,
+    cost: q.cost * shareFrac.value,
+    face: q.face * shareFrac.value
+  };
+});
+
 const currentWindowBlocks = computed(() => {
   if (!props.ask.window) return 0;
-  return windowPickBlocks.value ?? activeQuote.value?.d ?? props.ask.window.min;
+  return windowPickBlocks.value ?? baseQuote.value?.d ?? props.ask.window.min;
+});
+
+const isWindowGrid = computed(() => {
+  if (!isWindow.value || !props.height) return false;
+  return (props.height + currentWindowBlocks.value) % GRID_BLOCKS === 0;
 });
 
 const collateral = computed(() => props.ask.bond?.collateral || props.ask.collateral);
-const repayment = computed(() => props.ask.bond?.repayment ?? props.ask.repayment ?? activeQuote.value?.face ?? 0);
+const repayment = computed(
+  () => props.ask.bond?.repayment ?? props.ask.repayment ?? baseQuote.value?.face ?? 0
+);
 const rule = computed(() => props.ask.bond?.rule || props.ask.rule);
 const ratio = computed(() => props.ask.bond?.ratio ?? props.ask.ratio);
 const maxOracleAge = computed(() => props.ask.bond?.oracleAge ?? props.ask.oracleAge ?? 60);
@@ -113,20 +162,27 @@ const termReturnPct = computed(() => {
   return (q.face / q.cost - 1) * 100;
 });
 
-/* Mini APR Path Chart (Window yield curve OR fill-later trajectory vs Best Bid) */
+const recoveryLabel = computed(() => {
+  const v = props.ask.bond?.vault;
+  if (v === "selective") return "Selective shares vault";
+  if (v) return "Dutch auction vault";
+  return "Collateral in kind";
+});
+
+/* Interactive APR Path Chart (Window curve OR fill-later trajectory vs Best Bid) */
 const pathData = computed(() => {
   const h = props.height;
   const bidLine = props.curves?.bidLine || [];
-  const W = 280;
-  const H = 132;
+  const W = 286;
+  const H = 148;
   const PAD = { l: 34, r: 10, t: 10, b: 22 };
 
-  let mine: { x: number; y: number | null; raw: number }[] = [];
-  let bid: { x: number; y: number | null }[] = [];
+  const mine: { x: number; y: number | null; raw: number }[] = [];
+  const bid: { x: number; y: number | null }[] = [];
 
   if (isWindow.value && props.ask.window) {
     const { min, max } = props.ask.window;
-    const steps = 32;
+    const steps = 36;
     for (let i = 0; i <= steps; i++) {
       const d = min + ((max - min) * i) / steps;
       const q = askQuote(props.ask, h, d);
@@ -141,8 +197,11 @@ const pathData = computed(() => {
           ? at + (props.ask.duration || DAY_BLOCKS)
           : props.ask.maturity
         : props.ask.bond?.maturity ?? props.ask.quote?.maturity;
-    const end = Math.max(h + 30, Math.min((props.ask.expiry || h + 5040) - 1, (matAt(h) || h + 5040) - 4));
-    const steps = 32;
+    const end = Math.max(
+      h + 30,
+      Math.min((props.ask.expiry || h + 5040) - 1, (matAt(h) || h + 5040) - 4)
+    );
+    const steps = 36;
     for (let i = 0; i <= steps; i++) {
       const at = h + ((end - h) * i) / steps;
       const q = askQuote(props.ask, at);
@@ -153,7 +212,9 @@ const pathData = computed(() => {
     }
   }
 
-  const allY = [...mine, ...bid].map((p) => p.y).filter((v): v is number => v != null && Number.isFinite(v));
+  const allY = [...mine, ...bid]
+    .map((p) => p.y)
+    .filter((v): v is number => v != null && Number.isFinite(v));
   const yMax = Math.max(8, ...(allY.length ? allY : [10])) * 1.18;
   const xMin = mine[0]?.x ?? 0;
   const xMax = Math.max(xMin + 0.5, mine[mine.length - 1]?.x ?? 1);
@@ -175,7 +236,35 @@ const pathData = computed(() => {
     return d;
   };
 
-  const crossIdx = mine.findIndex((p, idx) => p.y != null && bid[idx]?.y != null && p.y >= (bid[idx].y as number));
+  // Shaded clear zone where ask >= best bid
+  let clearArea = "";
+  let run: { x: number; hi: number; lo: number }[] = [];
+  const flush = () => {
+    if (run.length > 1) {
+      clearArea +=
+        `M${run.map((p) => `${sx(p.x).toFixed(1)},${sy(p.hi).toFixed(1)}`).join("L")}` +
+        `L${run
+          .slice()
+          .reverse()
+          .map((p) => `${sx(p.x).toFixed(1)},${sy(p.lo).toFixed(1)}`)
+          .join("L")}Z `;
+    }
+    run = [];
+  };
+  for (let i = 0; i < mine.length; i++) {
+    const m = mine[i];
+    const b = bid[i];
+    if (m.y != null && b?.y != null && m.y >= b.y) {
+      run.push({ x: m.x, hi: m.y, lo: b.y });
+    } else {
+      flush();
+    }
+  }
+  flush();
+
+  const crossIdx = mine.findIndex(
+    (p, idx) => p.y != null && bid[idx]?.y != null && p.y >= (bid[idx].y as number)
+  );
   const cross = crossIdx >= 0 ? mine[crossIdx] : null;
 
   return {
@@ -187,11 +276,43 @@ const pathData = computed(() => {
     xMax,
     sx,
     sy,
+    mine,
+    bid,
     minePath: mkPath(mine),
     bidPath: mkPath(bid),
+    clearArea,
     cross
   };
 });
+
+const pathHover = computed(() => {
+  const idx = pathHoverIdx.value;
+  if (idx == null) return null;
+  const d = pathData.value;
+  const m = d.mine[idx];
+  const b = d.bid[idx];
+  if (!m) return null;
+  return {
+    px: d.sx(m.x),
+    xDays: m.x,
+    askY: m.y,
+    bidY: b?.y ?? null
+  };
+});
+
+function onPathMove(e: PointerEvent) {
+  const el = e.currentTarget as SVGSVGElement;
+  const r = el.getBoundingClientRect();
+  const d = pathData.value;
+  const X = ((e.clientX - r.left) / (r.width || 1)) * d.W;
+  if (X < d.PAD.l || X > d.W - d.PAD.r) {
+    pathHoverIdx.value = null;
+    return;
+  }
+  const frac = (X - d.PAD.l) / (d.W - d.PAD.l - d.PAD.r);
+  const idx = Math.round(frac * (d.mine.length - 1));
+  pathHoverIdx.value = Math.max(0, Math.min(d.mine.length - 1, idx));
+}
 
 async function copyId() {
   try {
@@ -210,9 +331,20 @@ function openPreview() {
   if (!q) return;
   const m = props.ask.market;
   emit("preview", {
-    title: props.ask.kind === "order" ? `Fund ${m} Borrow Order` : `Buy ${kindLabel(props.ask.kind)} (${m})`,
+    title:
+      props.ask.kind === "order"
+        ? `Fund ${m} Borrow Order`
+        : isBuyback.value
+          ? `Buy Back Your ${props.ask.kind === "shares" ? "Shares" : "Bond"}`
+          : `Buy ${kindLabel(props.ask.kind)} (${m})`,
     subtitle: `${pricingName(props.ask)} · ${shortenString(props.ask.id, 14)}`,
-    badge: props.ask.kind === "order" ? "Direct Lend" : "Secondary Buy",
+    badge:
+      props.ask.kind === "order"
+        ? "Direct Lend"
+        : isBuyback.value
+          ? "Loan Buyback"
+          : "Secondary Buy",
+    tone: "bid",
     heroLabel: props.ask.kind === "order" ? "You fund now" : "You pay now",
     heroValue: formatMarketAmount(q.cost, m),
     heroSub: `${formatApr(q.yieldBps)} APR · ${q.pct.toFixed(2)}% of face`,
@@ -223,6 +355,14 @@ function openPreview() {
         label: "Maturity",
         value: `${dateAtHeight(props.height + q.d, props.height)} · ${formatDur(q.d, props.unit)}`
       },
+      ...(isShares.value
+        ? [
+            {
+              label: "Share lot",
+              value: `${formatNumber((selectedShareUnits.value / SHARES_UNITS) * 100, 2, 0)} / 100 shares`
+            }
+          ]
+        : []),
       {
         label: "Collateral cover",
         value:
@@ -231,13 +371,14 @@ function openPreview() {
             : "Maturity rule"
       },
       ...(props.ask.kind === "order"
-        ? [{ label: "Liquidation fee reserve", value: "0.05 ERG (returned on settlement)" }]
+        ? [{ label: "Fee reserve", value: "0.05 ERG (returned)" }]
         : [])
     ],
     rawSummary: {
       action: props.ask.kind === "order" ? "fillOrder" : "buyAsk",
       boxId: props.ask.id,
       market: m,
+      units: isShares.value ? String(selectedShareUnits.value) : "1",
       cost: q.cost,
       face: q.face,
       yieldBps: Math.round(q.yieldBps),
@@ -249,22 +390,33 @@ function openPreview() {
 </script>
 
 <template>
-  <aside class="sf-plate flex h-full flex-col overflow-hidden rounded-2xl" aria-label="Ask Inspector">
+  <aside
+    class="sf-action-dock flex h-full min-h-0 flex-col rounded-[22px] rounded-tr-[6px]"
+    :data-tone="usable && !ask.owner ? 'bid' : 'ask'"
+    aria-label="Ask Inspector"
+    @mousemove="onDockPointerMove"
+  >
     <!-- Header -->
-    <div class="border-b border-[color:var(--sf-line)] px-4 py-3.5">
+    <div class="sf-panel-head shrink-0 px-4 pt-3.5 pb-3">
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-1.5">
             <span
-              class="sf-mono rounded bg-[color:var(--sf-ask-soft)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-ask)]"
+              class="sf-mono rounded-[4px] border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-ask)]"
             >
               {{ kindLabel(ask.kind) }} · {{ ask.market }}
             </span>
             <span
-              class="sf-mono rounded px-1.5 py-0.5 text-[10px] font-semibold"
+              v-if="isBuyback"
+              class="sf-mono rounded-[4px] bg-[color:var(--sf-bid-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold text-[color:var(--sf-bid)]"
+            >
+              Your loan
+            </span>
+            <span
+              class="sf-mono rounded-[4px] px-1.5 py-0.5 text-[9.5px] font-semibold"
               :class="
                 ask.owner
-                  ? 'bg-cobalt-50 text-cobalt-700'
+                  ? 'bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
                   : ask.ok
                     ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
                     : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
@@ -275,13 +427,13 @@ function openPreview() {
           </div>
 
           <div class="mt-1.5 flex items-center gap-1.5">
-            <span class="truncate text-[12.5px] font-medium text-[color:var(--sf-ink)]">
+            <span class="truncate text-[12px] font-medium text-[color:var(--sf-ink)]">
               {{ pricingName(ask) }}
             </span>
             <button
               type="button"
-              class="sf-mono inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-well)] hover:text-[color:var(--sf-ink)]"
-              :title="`Copy box ID ${ask.id}`"
+              class="sf-mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-0.5 text-[10px] text-[color:var(--sf-muted)] transition-colors hover:bg-[color:var(--sf-well-soft)] hover:text-[color:var(--sf-ink)]"
+              :title="`Copy ${ask.id}`"
               @click="copyId"
             >
               <span>{{ shortenString(ask.id, 10) }}</span>
@@ -293,9 +445,9 @@ function openPreview() {
 
         <button
           type="button"
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-well)] hover:text-[color:var(--sf-ink)]"
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[color:var(--sf-muted)] transition-all hover:bg-[color:var(--sf-well-soft)] hover:text-[color:var(--sf-ink)] active:scale-90"
           aria-label="Close inspector"
-          title="Back to Order Ticket"
+          title="Back to ticket (Esc)"
           @click="emit('close')"
         >
           <x-icon class="h-4 w-4" />
@@ -303,74 +455,69 @@ function openPreview() {
       </div>
 
       <!-- Inspector Sub-Tabs -->
-      <div
-        class="mt-3 grid grid-cols-3 rounded-lg border border-[color:var(--sf-line)] bg-[color:var(--sf-well)] p-0.5 text-[11.5px]"
-      >
+      <div class="sf-seg mt-2.5 grid w-full grid-cols-3 text-[11px]">
         <button
           v-for="t in (['quote', 'path', 'risk'] as const)"
           :key="t"
           type="button"
-          class="relative rounded-md py-1 font-semibold capitalize transition-all"
-          :class="
-            tab === t
-              ? 'bg-[color:var(--sf-card)] text-[color:var(--sf-ink)] shadow-sm ring-1 ring-slate-900/10'
-              : 'text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
-          "
+          class="sf-seg-btn relative py-1 capitalize"
+          :class="tab === t ? 'is-active tone-cobalt' : ''"
           @click="tab = t"
         >
-          {{ t === "path" ? "APR Path" : t }}
+          <span>{{ t === "path" ? "APR Path" : t }}</span>
           <span
             v-if="t === 'risk' && !ask.ok"
-            class="ml-1 inline-block h-1.5 w-1.5 rounded-full bg-[color:var(--sf-ask)] align-middle"
+            class="h-1.5 w-1.5 rounded-full bg-[color:var(--sf-ask)]"
           />
         </button>
       </div>
     </div>
 
-    <!-- Body -->
-    <div class="sf-scroll flex-1 overflow-y-auto px-4 py-3.5">
+    <!-- Scrollable Body -->
+    <div class="sf-scroll min-h-0 flex-1 overflow-y-auto px-4 py-3">
       <!-- TAB 1: QUOTE -->
-      <div v-if="tab === 'quote'" class="space-y-3.5">
+      <div v-if="tab === 'quote'" class="space-y-3">
         <div
-          class="grid grid-cols-2 divide-x divide-[color:var(--sf-line)] rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)]"
+          class="grid grid-cols-2 divide-x divide-[color:var(--sf-line)] rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)]"
         >
-          <div class="p-3">
+          <div class="p-2.5">
             <div class="sf-mono text-[9.5px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-              {{ isWindow && windowPickBlocks == null ? "Best APR" : "APR now" }}
+              {{ isWindow && windowPickBlocks == null ? "Best APR" : "APR" }}
             </div>
-            <div class="sf-serif mt-0.5 text-[24px] font-semibold leading-tight text-[color:var(--sf-bid)]">
+            <div class="sf-serif mt-0.5 text-[24px] font-semibold leading-none text-[color:var(--sf-bid)]">
               {{ formatApr(activeQuote?.yieldBps) }}
             </div>
-            <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
+            <div class="sf-mono mt-1 text-[10px] text-[color:var(--sf-dim)]">
               {{ termReturnPct != null ? `${termReturnPct.toFixed(2)}% term` : "—" }}
             </div>
           </div>
 
-          <div class="p-3">
+          <div class="p-2.5">
             <div class="sf-mono text-[9.5px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-              {{ ask.kind === "order" ? "Fund now" : "Pay now" }}
+              {{ ask.kind === "order" ? "Fund" : "Pay" }}
             </div>
             <div class="sf-mono mt-0.5 text-[18px] font-semibold leading-tight text-[color:var(--sf-ink)]">
               {{ activeQuote ? formatCompact(activeQuote.cost) : "—" }}
               <span class="text-[11px] font-medium text-[color:var(--sf-muted)]">{{ ask.market }}</span>
             </div>
-            <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-              {{ activeQuote ? `${activeQuote.pct.toFixed(2)}% of face` : "" }}
+            <div class="sf-mono mt-0.5 text-[10px] text-[color:var(--sf-dim)]">
+              {{ activeQuote ? `${activeQuote.pct.toFixed(2)}% par` : "" }}
             </div>
           </div>
         </div>
 
-        <!-- Window Maturity Interactive Slider -->
+        <!-- Window Maturity Slider -->
         <div
           v-if="isWindow && ask.window"
-          class="rounded-xl border border-cobalt-600/25 bg-cobalt-50/45 p-3"
+          class="rounded-xl border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/45 p-2.5"
         >
-          <div class="flex items-center justify-between text-[11px]">
-            <span class="sf-mono font-semibold uppercase tracking-[0.08em] text-cobalt-700">
-              Pick maturity
+          <div class="sf-mono flex items-center justify-between text-[10.5px]">
+            <span class="font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-cobalt)]">
+              Maturity
             </span>
-            <span class="sf-mono font-semibold text-[color:var(--sf-ink)]">
-              {{ formatDur(currentWindowBlocks, unit) }}
+            <span class="font-semibold text-[color:var(--sf-ink)]">
+              {{ formatDur(currentWindowBlocks, unit)
+              }}<span v-if="isWindowGrid" class="ml-1 text-[color:var(--sf-cobalt)]">· grid</span>
             </span>
           </div>
           <input
@@ -383,22 +530,46 @@ function openPreview() {
             class="sf-range mt-2"
             @input="windowPickBlocks = Number(($event.target as HTMLInputElement).value)"
           />
-          <div class="sf-mono mt-1 flex justify-between text-[10px] text-[color:var(--sf-muted)]">
+          <div class="sf-mono mt-1 flex justify-between text-[9.5px] text-[color:var(--sf-muted)]">
             <span>{{ formatDur(ask.window.min, unit) }}</span>
             <span>{{ formatDur(ask.window.max, unit) }}</span>
           </div>
         </div>
 
-        <!-- Terms Rows -->
-        <dl class="divide-y divide-[color:var(--sf-line)] text-[12px]">
-          <div class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Claim if repaid</dt>
+        <!-- Share Lot Partial Selector -->
+        <div
+          v-if="isShares && maxSharesPct > minSharesPct"
+          class="rounded-xl border border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)]/40 p-2.5"
+        >
+          <div class="sf-mono flex items-center justify-between text-[10.5px]">
+            <span class="font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-bid)]">
+              Shares
+            </span>
+            <span class="font-semibold text-[color:var(--sf-ink)]">
+              {{ formatNumber(sharesPct, 2, 0) }} / {{ formatNumber(maxSharesPct, 2, 0) }}
+            </span>
+          </div>
+          <input
+            v-model.number="sharesPct"
+            type="range"
+            :min="minSharesPct"
+            :max="maxSharesPct"
+            step="0.5"
+            aria-label="Select share quantity"
+            class="sf-range mt-2"
+          />
+        </div>
+
+        <!-- Compact Terms -->
+        <dl class="divide-y divide-[color:var(--sf-line)] text-[11.5px]">
+          <div class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Claim</dt>
             <dd class="sf-mono font-semibold text-[color:var(--sf-ink)]">
               {{ activeQuote ? formatMarketAmount(activeQuote.face, ask.market) : "—" }}
             </dd>
           </div>
-          <div class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Gain before fees</dt>
+          <div class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Gross gain</dt>
             <dd class="sf-mono font-semibold text-[color:var(--sf-bid)]">
               {{
                 activeQuote
@@ -407,7 +578,7 @@ function openPreview() {
               }}
             </dd>
           </div>
-          <div class="flex justify-between gap-2 py-2">
+          <div class="flex justify-between gap-2 py-1.5">
             <dt class="text-[color:var(--sf-muted)]">Matures</dt>
             <dd class="sf-mono text-right font-medium text-[color:var(--sf-ink)]">
               <template v-if="isWindow && ask.window && windowPickBlocks == null">
@@ -422,51 +593,70 @@ function openPreview() {
               <template v-else>—</template>
             </dd>
           </div>
-          <div v-if="ask.kind === 'shares'" class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Share lot</dt>
+          <div v-if="isShares" class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Available</dt>
             <dd class="sf-mono font-medium text-[color:var(--sf-ink)]">
-              {{ formatNumber((ask.units / SHARES_UNITS) * 100, 2, 0) }} / 100 shares
+              {{ formatNumber(maxSharesPct, 2, 0) }} / 100 sh
             </dd>
           </div>
-          <div v-if="ask.kind === 'order'" class="flex justify-between gap-2 py-2">
+          <div v-if="ask.kind === 'order'" class="flex justify-between gap-2 py-1.5">
             <dt class="text-[color:var(--sf-muted)]">Fee reserve</dt>
-            <dd class="sf-mono text-[color:var(--sf-ink-2)]">0.05 ERG, returned</dd>
+            <dd class="sf-mono text-[color:var(--sf-ink-2)]">0.05 ERG · returned</dd>
           </div>
         </dl>
 
-        <!-- Quick Safety Banner -->
+        <!-- Safety Shortcut -->
         <button
           type="button"
-          class="flex w-full items-center justify-between gap-2 rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] px-3 py-2.5 text-left text-[11.5px] transition-colors hover:border-[color:var(--sf-line-strong)]"
+          class="flex w-full items-center justify-between gap-2 rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] px-3 py-2 text-left text-[11px] transition-all hover:border-[color:var(--sf-line-cobalt)]"
           @click="tab = 'risk'"
         >
           <span class="flex items-center gap-2 text-[color:var(--sf-ink-2)]">
-            <shield-icon class="h-3.5 w-3.5 shrink-0 text-cobalt-600" />
+            <shield-icon class="h-3.5 w-3.5 shrink-0 text-[color:var(--sf-cobalt)]" />
             <span>
               {{
                 rule === "oracle"
                   ? `${cov != null ? Math.round(cov) : "—"}% cover · liq < ${ratio ?? "—"}%`
-                  : "Maturity rule · no early trigger"
+                  : "Maturity rule"
               }}
             </span>
           </span>
           <span
-            class="sf-mono shrink-0 text-[10.5px] font-semibold"
+            class="sf-mono shrink-0 text-[10px] font-semibold"
             :class="ask.ok ? 'text-[color:var(--sf-bid)]' : 'text-[color:var(--sf-ask)]'"
           >
-            {{ !ask.ok ? "Paused" : ask.guard ? "Guarded" : "Inspect" }}
+            {{ !ask.ok ? "Paused" : ask.guard ? "Guarded" : "Risk →" }}
           </span>
         </button>
       </div>
 
-      <!-- TAB 2: APR PATH -->
-      <div v-else-if="tab === 'path'" class="space-y-3">
-        <div class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] p-2.5">
+      <!-- TAB 2: INTERACTIVE APR PATH -->
+      <div v-else-if="tab === 'path'" class="space-y-2.5">
+        <div
+          class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] p-2.5"
+        >
+          <div class="sf-mono mb-1 flex items-center justify-between text-[10px]">
+            <span class="uppercase tracking-[0.08em] text-[color:var(--sf-muted)]">
+              {{ isWindow ? "Curve by term" : "Fill-later trajectory" }}
+            </span>
+            <span v-if="pathHover" class="font-semibold text-[color:var(--sf-ink)]">
+              <span class="text-[color:var(--sf-ask)]">
+                {{ pathHover.askY != null ? `${pathHover.askY.toFixed(2)}%` : "—" }}
+              </span>
+              <span class="mx-1 text-[color:var(--sf-dim)]">/</span>
+              <span class="text-[color:var(--sf-bid)]">
+                {{ pathHover.bidY != null ? `${pathHover.bidY.toFixed(2)}%` : "—" }}
+              </span>
+            </span>
+          </div>
+
           <svg
             :viewBox="`0 0 ${pathData.W} ${pathData.H}`"
-            class="h-[136px] w-full"
+            class="h-[144px] w-full cursor-crosshair select-none"
             role="img"
             :aria-label="isWindow ? 'Window APR curve' : 'APR if filled later'"
+            @pointermove="onPathMove"
+            @pointerleave="pathHoverIdx = null"
           >
             <g v-for="frac in [0, 0.5, 1]" :key="frac">
               <line
@@ -510,6 +700,12 @@ function openPreview() {
             </text>
 
             <path
+              v-if="pathData.clearArea"
+              :d="pathData.clearArea"
+              fill="var(--sf-bid)"
+              fill-opacity="0.14"
+            />
+            <path
               v-if="pathData.bidPath"
               :d="pathData.bidPath"
               fill="none"
@@ -535,62 +731,90 @@ function openPreview() {
               stroke="var(--sf-bid)"
               stroke-dasharray="2 3"
             />
+
+            <g v-if="pathHover" pointer-events="none">
+              <line
+                :x1="pathHover.px"
+                :x2="pathHover.px"
+                :y1="pathData.PAD.t"
+                :y2="pathData.H - pathData.PAD.b"
+                stroke="var(--sf-line-strong)"
+              />
+              <circle
+                v-if="pathHover.askY != null"
+                :cx="pathHover.px"
+                :cy="pathData.sy(pathHover.askY)"
+                r="3.2"
+                fill="var(--sf-ask)"
+                stroke="var(--sf-card)"
+                stroke-width="1.5"
+              />
+              <circle
+                v-if="pathHover.bidY != null"
+                :cx="pathHover.px"
+                :cy="pathData.sy(pathHover.bidY)"
+                r="3.2"
+                fill="var(--sf-bid)"
+                stroke="var(--sf-card)"
+                stroke-width="1.5"
+              />
+            </g>
           </svg>
         </div>
 
-        <div class="flex items-center gap-4 text-[11px] text-[color:var(--sf-muted)]">
+        <div class="flex items-center gap-3.5 text-[10.5px] text-[color:var(--sf-muted)]">
           <span class="inline-flex items-center gap-1.5">
             <span class="h-0.5 w-3 bg-[color:var(--sf-ask)]" />
-            <span>{{ isWindow ? "Curve by maturity" : "This ask" }}</span>
+            <span>{{ isWindow ? "Window APR" : "This ask" }}</span>
           </span>
           <span class="inline-flex items-center gap-1.5">
             <span class="h-0.5 w-3 border-t border-dashed border-[color:var(--sf-bid)]" />
-            <span>Best bid today</span>
+            <span>Best bid</span>
           </span>
         </div>
 
-        <p class="text-[12px] leading-relaxed text-[color:var(--sf-ink-2)]">
+        <div
+          class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] px-3 py-2 text-[11.5px] leading-snug text-[color:var(--sf-ink-2)]"
+        >
           <template v-if="isWindow">
-            Variable-maturity order pays the APR along its curve at the maturity you pick, capped at
-            {{ formatApr(ask.cap) }}.
+            Variable-maturity curve capped at {{ formatApr(ask.cap) }}.
           </template>
           <template v-else-if="pathData.cross">
             {{
               pathData.cross.x === 0
-                ? "Clears today's best bid now — a standing lend offer can match it on the next batch."
-                : `Reaches today's best bid in ${formatDurLong(pathData.cross.raw - height, unit)} if bids hold steady.`
+                ? "Crosses best bid now — batch-matchable."
+                : `Crosses today's best bid in ${formatDurLong(pathData.cross.raw - height, unit)}.`
             }}
           </template>
           <template v-else>
-            Does not cross today's best bid before expiry; a direct lender can still fund it at its
-            quote.
+            Below current best bid until expiry; direct fill only.
           </template>
-        </p>
+        </div>
       </div>
 
       <!-- TAB 3: RISK & SHOCK SIMULATOR -->
-      <div v-else class="space-y-3.5">
-        <dl class="divide-y divide-[color:var(--sf-line)] text-[12px]">
-          <div class="flex items-center justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Cover now</dt>
+      <div v-else class="space-y-3">
+        <dl class="divide-y divide-[color:var(--sf-line)] text-[11.5px]">
+          <div class="flex items-center justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Cover</dt>
             <dd>
               <cover-meter :value="cov" :ratio="ratio" :guard="ask.guard?.ratio" compact />
             </dd>
           </div>
-          <div class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Liquidates if</dt>
+          <div class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Liquidates</dt>
             <dd class="sf-mono font-semibold text-[color:var(--sf-ink)]">
-              <template v-if="!liqInfo">Unpaid at maturity</template>
+              <template v-if="!liqInfo">At maturity</template>
               <template v-else-if="liqInfo.price == null">
-                {{ liqInfo.dir === "never" ? "Price cannot trigger" : "Now" }}
+                {{ liqInfo.dir === "never" ? "Never on price" : "Now" }}
               </template>
               <template v-else>
                 ERG {{ liqInfo.dir === "below" ? "<" : ">" }} ${{ liqInfo.price.toFixed(3) }}
               </template>
             </dd>
           </div>
-          <div v-if="liqDistancePct != null" class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Price buffer</dt>
+          <div v-if="liqDistancePct != null" class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Buffer</dt>
             <dd
               class="sf-mono font-semibold"
               :class="liqDistancePct < 12 ? 'text-[color:var(--sf-ask)]' : 'text-[color:var(--sf-bid)]'"
@@ -598,7 +822,7 @@ function openPreview() {
               {{ liqDistancePct.toFixed(1) }}%
             </dd>
           </div>
-          <div class="flex justify-between gap-2 py-2">
+          <div class="flex justify-between gap-2 py-1.5">
             <dt class="text-[color:var(--sf-muted)]">
               {{ ask.kind === "order" ? "Fill guard" : "Sale guard" }}
             </dt>
@@ -606,24 +830,32 @@ function openPreview() {
               {{ ask.guard ? `≥ ${ask.guard.ratio}% · ≤ ${ask.guard.age} blk` : "None" }}
             </dd>
           </div>
-          <div class="flex justify-between gap-2 py-2">
-            <dt class="text-[color:var(--sf-muted)]">Oracle age</dt>
+          <div class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Oracle</dt>
             <dd
               class="sf-mono"
-              :class="oracleAge > maxOracleAge ? 'font-semibold text-[color:var(--sf-ask)]' : 'text-[color:var(--sf-ink-2)]'"
+              :class="
+                oracleAge > maxOracleAge
+                  ? 'font-semibold text-[color:var(--sf-ask)]'
+                  : 'text-[color:var(--sf-ink-2)]'
+              "
             >
               {{ oracleAge }} / {{ maxOracleAge }} blk
             </dd>
           </div>
+          <div class="flex justify-between gap-2 py-1.5">
+            <dt class="text-[color:var(--sf-muted)]">Recovery</dt>
+            <dd class="sf-mono text-[color:var(--sf-ink-2)]">{{ recoveryLabel }}</dd>
+          </div>
         </dl>
 
-        <!-- Interactive ERG Price Shock Simulator -->
+        <!-- ERG Price Shock Simulator -->
         <div
           v-if="rule === 'oracle' && oraclePrice > 0 && shockedCover != null"
-          class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] p-3"
+          class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] p-2.5"
         >
           <div class="flex items-center justify-between text-[11px]">
-            <span class="font-medium text-[color:var(--sf-ink-2)]">ERG price shock</span>
+            <span class="font-medium text-[color:var(--sf-ink-2)]">ERG shock</span>
             <span class="sf-mono font-semibold text-[color:var(--sf-ink)]">
               {{ shockPct > 0 ? "+" : "" }}{{ shockPct }}% · ${{
                 (oraclePrice * (1 + shockPct / 100)).toFixed(3)
@@ -639,7 +871,7 @@ function openPreview() {
             aria-label="ERG price shock simulation"
             class="sf-range mt-2"
           />
-          <div class="mt-2 flex items-center justify-between text-[11.5px]">
+          <div class="mt-1.5 flex items-center justify-between text-[11px]">
             <span class="text-[color:var(--sf-muted)]">Scenario cover</span>
             <span
               class="sf-mono font-semibold"
@@ -659,11 +891,11 @@ function openPreview() {
         </div>
 
         <!-- Locked Collateral Breakdown -->
-        <div class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] p-3">
-          <div class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Locked collateral
+        <div class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] p-2.5">
+          <div class="sf-mono text-[9.5px] font-semibold uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
+            Collateral
           </div>
-          <div class="sf-mono mt-1.5 space-y-1 text-[11.5px] text-[color:var(--sf-ink)]">
+          <div class="sf-mono mt-1 space-y-0.5 text-[11px] text-[color:var(--sf-ink)]">
             <div v-if="collateral.erg > 0.0011" class="flex justify-between">
               <span>ERG</span>
               <span class="font-semibold">{{ formatNumber(collateral.erg, 3, 0) }} ERG</span>
@@ -685,15 +917,12 @@ function openPreview() {
           </div>
         </div>
 
-        <!-- On-chain Checks -->
+        <!-- Contract Checks -->
         <div v-if="ask.checks.length" class="space-y-1">
-          <div class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-            Contract verification
-          </div>
           <div
             v-for="chk in ask.checks"
             :key="chk.key"
-            class="flex items-center gap-2 text-[11.5px]"
+            class="flex items-center gap-1.5 text-[11px]"
             :class="chk.ok ? 'text-[color:var(--sf-ink-2)]' : 'text-[color:var(--sf-ask)]'"
           >
             <check-circle-icon
@@ -706,18 +935,27 @@ function openPreview() {
       </div>
     </div>
 
-    <!-- Action Footer -->
-    <div class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] p-4">
+    <!-- Pinned Action Footer -->
+    <div class="shrink-0 space-y-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-3">
+      <router-link
+        v-if="ask.owner"
+        to="/app/portfolio"
+        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[12.5px] font-semibold"
+      >
+        <span>Manage in Portfolio</span>
+        <arrow-right-icon class="h-3.5 w-3.5" />
+      </router-link>
       <button
+        v-else
         type="button"
         :disabled="!usable || !activeQuote"
-        class="sf-btn-primary flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-45"
+        class="sf-btn-bid flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-40"
         @click="openPreview"
       >
         <span>
           {{
             usable && activeQuote
-              ? `Preview ${ask.kind === "order" ? "Fund" : "Buy"} · ${formatMarketAmount(
+              ? `${ask.kind === "order" ? "Fund" : isBuyback ? "Buy back" : "Buy"} ${formatMarketAmount(
                   activeQuote.cost,
                   ask.market
                 )}`
@@ -726,6 +964,14 @@ function openPreview() {
         </span>
         <arrow-right-icon v-if="usable" class="h-3.5 w-3.5" />
       </button>
+
+      <router-link
+        :to="{ name: 'zc-bond', params: { id: ask.id } }"
+        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/55 px-4 py-2 text-[12px] font-semibold text-[color:var(--sf-cobalt)] transition-all hover:bg-[color:var(--sf-cobalt-soft)]"
+      >
+        <span>Full {{ ask.kind === "order" ? "Order" : "Bond" }} Terms &amp; Verification</span>
+        <arrow-up-right-icon class="h-3.5 w-3.5" />
+      </router-link>
     </div>
   </aside>
 </template>

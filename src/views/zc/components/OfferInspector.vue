@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import {
   ArrowRightIcon,
+  ArrowUpRightIcon,
   CheckCircleIcon,
   CheckIcon,
   CopyIcon,
@@ -36,11 +37,19 @@ const props = defineProps<{
 const emit = defineEmits<{
   (e: "close"): void;
   (e: "borrow-against", params: { aprPct: number; days: number }): void;
+  (e: "sell-against", params: { aprPct: number; days: number }): void;
 }>();
 
 const copied = ref(false);
 const buys = ref<ZcMatchBuy[]>([]);
 const hoverDays = ref<number | null>(null);
+
+function onDockPointerMove(e: MouseEvent) {
+  const el = e.currentTarget as HTMLElement;
+  const r = el.getBoundingClientRect();
+  el.style.setProperty("--spot-x", `${e.clientX - r.left}px`);
+  el.style.setProperty("--spot-y", `${e.clientY - r.top}px`);
+}
 
 let matchAc: AbortController | null = null;
 
@@ -62,9 +71,13 @@ async function fetchMatches() {
   }
 }
 
-watch([() => props.offer.id, () => props.connected, () => props.revision], () => {
-  void fetchMatches();
-}, { immediate: true });
+watch(
+  [() => props.offer.id, () => props.connected, () => props.revision],
+  () => {
+    void fetchMatches();
+  },
+  { immediate: true }
+);
 
 onBeforeUnmount(() => matchAc?.abort());
 
@@ -90,7 +103,7 @@ const requiredBps = computed(() => {
 
 /* Mini Offer Curve SVG */
 const chartData = computed(() => {
-  const W = 280;
+  const W = 286;
   const H = 132;
   const PAD = { l: 34, r: 10, t: 10, b: 22 };
   const loD = props.offer.minBlocks;
@@ -114,8 +127,10 @@ const chartData = computed(() => {
   const xMin = loD / DAY_BLOCKS;
   const xMax = hiD / DAY_BLOCKS;
 
-  const sx = (daysVal: number) => PAD.l + ((daysVal - xMin) / (xMax - xMin || 1)) * (W - PAD.l - PAD.r);
-  const sy = (apr: number) => PAD.t + (1 - Math.min(yMax, Math.max(0, apr)) / yMax) * (H - PAD.t - PAD.b);
+  const sx = (daysVal: number) =>
+    PAD.l + ((daysVal - xMin) / (xMax - xMin || 1)) * (W - PAD.l - PAD.r);
+  const sy = (apr: number) =>
+    PAD.t + (1 - Math.min(yMax, Math.max(0, apr)) / yMax) * (H - PAD.t - PAD.b);
 
   const lineD = pts
     .map((p, i) => `${i === 0 ? "M" : "L"}${sx(p.x).toFixed(1)},${sy(p.y).toFixed(1)}`)
@@ -158,53 +173,68 @@ async function copyId() {
   }
 }
 
-function handleBorrowAgainst() {
+function targetParams() {
   const targetD = Math.min(
     props.offer.maxBlocks,
     Math.max(props.offer.minBlocks, props.targetBlocks)
   );
   const yBps = (offerYieldAt(props.offer, targetD) ?? props.offer.minYieldBps) + 1;
-  emit("borrow-against", {
+  return {
     aprPct: Number((yBps / 100).toFixed(2)),
     days: Math.max(1, Math.round(targetD / DAY_BLOCKS))
-  });
+  };
+}
+
+function handleBorrowAgainst() {
+  emit("borrow-against", targetParams());
+}
+
+function handleSellAgainst() {
+  emit("sell-against", targetParams());
 }
 </script>
 
 <template>
-  <aside class="sf-plate flex h-full flex-col overflow-hidden rounded-2xl" aria-label="Lend Offer Inspector">
+  <aside
+    class="sf-action-dock flex h-full min-h-0 flex-col rounded-[22px] rounded-tr-[6px]"
+    data-tone="cobalt"
+    aria-label="Lend Offer Inspector"
+    @mousemove="onDockPointerMove"
+  >
     <!-- Header -->
-    <div class="border-b border-[color:var(--sf-line)] px-4 py-3.5">
+    <div class="sf-panel-head shrink-0 px-4 pt-3.5 pb-3">
       <div class="flex items-start justify-between gap-2">
         <div class="min-w-0">
           <div class="flex flex-wrap items-center gap-1.5">
             <span
-              class="sf-mono rounded bg-[color:var(--sf-bid-soft)] px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-bid)]"
+              class="sf-mono rounded-[4px] border border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.08em] text-[color:var(--sf-bid)]"
             >
               Lend Offer · {{ offer.market }}
             </span>
             <span
-              class="sf-mono rounded px-1.5 py-0.5 text-[10px] font-semibold"
+              class="sf-mono rounded-[4px] px-1.5 py-0.5 text-[9.5px] font-semibold"
               :class="
                 offer.owner
-                  ? 'bg-cobalt-50 text-cobalt-700'
+                  ? 'bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
                   : offer.ok
                     ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
                     : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
               "
             >
-              {{ offer.pending ? "Pending" : offer.owner ? "Yours" : offer.ok ? "Bidding" : offer.reason }}
+              {{
+                offer.pending ? "Pending" : offer.owner ? "Yours" : offer.ok ? "Bidding" : offer.reason
+              }}
             </span>
           </div>
 
           <div class="mt-1.5 flex items-center gap-1.5">
-            <span class="truncate text-[12.5px] font-medium text-[color:var(--sf-ink)]">
-              {{ offer.delivery === "unit" ? "Buys bond units" : `Delivers ${offer.delivery} shares` }}
+            <span class="truncate text-[12px] font-medium text-[color:var(--sf-ink)]">
+              {{ offer.delivery === "unit" ? "Bond units" : `${offer.delivery} shares` }}
             </span>
             <button
               type="button"
-              class="sf-mono inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10.5px] text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-well)] hover:text-[color:var(--sf-ink)]"
-              :title="`Copy offer ID ${offer.id}`"
+              class="sf-mono inline-flex items-center gap-1 rounded-[5px] px-1.5 py-0.5 text-[10px] text-[color:var(--sf-muted)] transition-colors hover:bg-[color:var(--sf-well-soft)] hover:text-[color:var(--sf-ink)]"
+              :title="`Copy ${offer.id}`"
               @click="copyId"
             >
               <span>{{ shortenString(offer.id, 10) }}</span>
@@ -216,9 +246,9 @@ function handleBorrowAgainst() {
 
         <button
           type="button"
-          class="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[color:var(--sf-muted)] hover:bg-[color:var(--sf-well)] hover:text-[color:var(--sf-ink)]"
+          class="grid h-7 w-7 shrink-0 place-items-center rounded-lg text-[color:var(--sf-muted)] transition-all hover:bg-[color:var(--sf-well-soft)] hover:text-[color:var(--sf-ink)] active:scale-90"
           aria-label="Close inspector"
-          title="Back to Order Ticket"
+          title="Back to ticket (Esc)"
           @click="emit('close')"
         >
           <x-icon class="h-4 w-4" />
@@ -226,25 +256,25 @@ function handleBorrowAgainst() {
       </div>
     </div>
 
-    <!-- Body -->
-    <div class="sf-scroll flex-1 space-y-3.5 overflow-y-auto px-4 py-3.5">
+    <!-- Scrollable Body -->
+    <div class="sf-scroll min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
       <!-- Headline Figures -->
       <div
-        class="grid grid-cols-2 divide-x divide-[color:var(--sf-line)] rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)]"
+        class="grid grid-cols-2 divide-x divide-[color:var(--sf-line)] rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)]"
       >
-        <div class="p-3">
+        <div class="p-2.5">
           <div class="sf-mono text-[9.5px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-            {{ upto ? `From (≤ ${formatDur(targetBlocks, unit)})` : `At ${formatDur(targetBlocks, unit)}` }}
+            {{ upto ? `From ≤${formatDur(targetBlocks, unit)}` : `At ${formatDur(targetBlocks, unit)}` }}
           </div>
-          <div class="sf-serif mt-0.5 text-[24px] font-semibold leading-tight text-[color:var(--sf-bid)]">
+          <div class="sf-serif mt-0.5 text-[24px] font-semibold leading-none text-[color:var(--sf-bid)]">
             {{ formatApr(requiredBps) }}
           </div>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ requiredBps == null ? "Outside range" : `floor ${formatApr(offer.minYieldBps)}` }}
+          <div class="sf-mono mt-1 text-[10px] text-[color:var(--sf-dim)]">
+            {{ requiredBps == null ? "Out of range" : `floor ${formatApr(offer.minYieldBps)}` }}
           </div>
         </div>
 
-        <div class="p-3">
+        <div class="p-2.5">
           <div class="sf-mono text-[9.5px] uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
             Capital
           </div>
@@ -252,17 +282,19 @@ function handleBorrowAgainst() {
             {{ formatCompact(offer.capital) }}
             <span class="text-[11px] font-medium text-[color:var(--sf-muted)]">{{ offer.market }}</span>
           </div>
-          <div class="sf-mono text-[10.5px] text-[color:var(--sf-dim)]">
-            {{ buys.length }} {{ buys.length === 1 ? "ask" : "asks" }} clear now
+          <div class="sf-mono mt-0.5 text-[10px] text-[color:var(--sf-dim)]">
+            {{ buys.length }} {{ buys.length === 1 ? "ask clears" : "asks clear" }}
           </div>
         </div>
       </div>
 
       <!-- Mini Rolling Yield Curve -->
-      <div class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-paper)] p-2.5">
-        <div class="mb-1 flex items-center justify-between text-[10.5px]">
+      <div
+        class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-inset)] p-2.5"
+      >
+        <div class="mb-1 flex items-center justify-between text-[10px]">
           <span class="sf-mono uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-            Rolling curve · {{ offer.points.length }} pts
+            Curve · {{ offer.points.length }} pts
           </span>
           <span v-if="hoverInfo" class="sf-mono font-semibold text-[color:var(--sf-bid)]">
             {{ formatDur(hoverInfo.blocks, unit) }} → {{ formatApr(hoverInfo.bps) }}
@@ -271,7 +303,7 @@ function handleBorrowAgainst() {
 
         <svg
           :viewBox="`0 0 ${chartData.W} ${chartData.H}`"
-          class="h-[132px] w-full cursor-crosshair select-none"
+          class="h-[126px] w-full cursor-crosshair select-none"
           role="img"
           aria-label="Offer rolling yield curve"
           @pointermove="onSvgMove"
@@ -279,7 +311,7 @@ function handleBorrowAgainst() {
         >
           <defs>
             <linearGradient id="sfOfferFill" x1="0" y1="0" x2="0" y2="1">
-              <stop offset="0%" stop-color="var(--sf-bid)" stop-opacity="0.18" />
+              <stop offset="0%" stop-color="var(--sf-bid)" stop-opacity="0.2" />
               <stop offset="100%" stop-color="var(--sf-bid)" stop-opacity="0" />
             </linearGradient>
           </defs>
@@ -305,7 +337,13 @@ function handleBorrowAgainst() {
             </text>
           </g>
 
-          <text :x="chartData.PAD.l" :y="chartData.H - 5" fill="var(--sf-muted)" font-size="9" class="sf-mono">
+          <text
+            :x="chartData.PAD.l"
+            :y="chartData.H - 5"
+            fill="var(--sf-muted)"
+            font-size="9"
+            class="sf-mono"
+          >
             {{ formatDur(offer.minBlocks, unit) }}
           </text>
           <text
@@ -334,10 +372,10 @@ function handleBorrowAgainst() {
             :key="i"
             :cx="chartData.sx(dot.d / DAY_BLOCKS)"
             :cy="chartData.sy(dot.y)"
-            r="2.8"
+            r="3"
             fill="var(--sf-ask)"
             stroke="var(--sf-card)"
-            stroke-width="1.2"
+            stroke-width="1.3"
           />
 
           <line
@@ -352,22 +390,22 @@ function handleBorrowAgainst() {
         </svg>
       </div>
 
-      <!-- Terms -->
-      <dl class="divide-y divide-[color:var(--sf-line)] text-[12px]">
-        <div class="flex justify-between gap-2 py-2">
+      <!-- Compact Terms -->
+      <dl class="divide-y divide-[color:var(--sf-line)] text-[11.5px]">
+        <div class="flex justify-between gap-2 py-1.5">
           <dt class="text-[color:var(--sf-muted)]">Maturities</dt>
           <dd class="sf-mono font-medium text-[color:var(--sf-ink)]">
             {{ formatDur(offer.minBlocks, unit) }} – {{ formatDur(offer.maxBlocks, unit) }}
           </dd>
         </div>
-        <div class="flex justify-between gap-2 py-2">
+        <div class="flex justify-between gap-2 py-1.5">
           <dt class="text-[color:var(--sf-muted)]">Cover floor</dt>
           <dd class="sf-mono font-semibold text-[color:var(--sf-ink)]">
             ≥ {{ offer.floor }}% · oracle
           </dd>
         </div>
-        <div class="flex justify-between gap-2 py-2">
-          <dt class="text-[color:var(--sf-muted)]">Also buys shares</dt>
+        <div class="flex justify-between gap-2 py-1.5">
+          <dt class="text-[color:var(--sf-muted)]">Buys shares</dt>
           <dd class="sf-mono text-[color:var(--sf-ink-2)]">
             {{
               offer.shares
@@ -380,18 +418,18 @@ function handleBorrowAgainst() {
             }}
           </dd>
         </div>
-        <div class="flex justify-between gap-2 py-2">
+        <div class="flex justify-between gap-2 py-1.5">
           <dt class="text-[color:var(--sf-muted)]">
             {{ offer.market === "ERG" ? "Batcher fee" : "Refund fee" }}
           </dt>
           <dd class="sf-mono text-[color:var(--sf-ink-2)]">
             {{ offer.fee }} ERG
             <template v-if="offer.tokenBudget?.rewardBudget != null">
-              · {{ formatNumber(offer.tokenBudget.rewardBudget, 3, 0) }} budget
+              · {{ formatNumber(offer.tokenBudget.rewardBudget, 3, 0) }} bgt
             </template>
           </dd>
         </div>
-        <div class="flex justify-between gap-2 py-2">
+        <div class="flex justify-between gap-2 py-1.5">
           <dt class="text-[color:var(--sf-muted)]">Expires</dt>
           <dd class="sf-mono text-[color:var(--sf-ink-2)]">
             {{ dateAtHeight(offer.expiry, height) }} ·
@@ -402,13 +440,10 @@ function handleBorrowAgainst() {
 
       <!-- Checks -->
       <div v-if="offer.checks.length" class="space-y-1">
-        <div class="sf-mono text-[10px] uppercase tracking-[0.1em] text-[color:var(--sf-muted)]">
-          Contract verification
-        </div>
         <div
           v-for="chk in offer.checks"
           :key="chk.key"
-          class="flex items-center gap-2 text-[11.5px] text-[color:var(--sf-ink-2)]"
+          class="flex items-center gap-1.5 text-[11px] text-[color:var(--sf-ink-2)]"
         >
           <check-circle-icon
             class="h-3.5 w-3.5 shrink-0"
@@ -419,17 +454,44 @@ function handleBorrowAgainst() {
       </div>
     </div>
 
-    <!-- Action Footer -->
-    <div class="border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] p-4">
-      <button
-        type="button"
-        :disabled="!usable"
-        class="sf-btn-primary flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-45"
-        @click="handleBorrowAgainst"
+    <!-- Pinned Action Footer -->
+    <div class="shrink-0 space-y-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-3">
+      <router-link
+        v-if="offer.owner"
+        to="/app/portfolio"
+        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[12.5px] font-semibold"
       >
-        <span>Match with Borrow Ticket</span>
+        <span>Manage in Portfolio</span>
         <arrow-right-icon class="h-3.5 w-3.5" />
-      </button>
+      </router-link>
+      <template v-else>
+        <button
+          type="button"
+          :disabled="!usable"
+          class="sf-btn-ask flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px] disabled:cursor-not-allowed disabled:opacity-40"
+          @click="handleBorrowAgainst"
+        >
+          <span>Borrow Against Offer</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </button>
+        <button
+          type="button"
+          :disabled="!usable"
+          class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-[12px] font-semibold text-[color:var(--sf-ink)] disabled:cursor-not-allowed disabled:opacity-40"
+          @click="handleSellAgainst"
+        >
+          <span>Sell Bond into Offer</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </button>
+      </template>
+
+      <router-link
+        :to="{ name: 'zc-offer', params: { id: offer.id } }"
+        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/55 px-4 py-2 text-[12px] font-semibold text-[color:var(--sf-cobalt)] transition-all hover:bg-[color:var(--sf-cobalt-soft)]"
+      >
+        <span>Full Offer Terms &amp; Curve</span>
+        <arrow-up-right-icon class="h-3.5 w-3.5" />
+      </router-link>
     </div>
   </aside>
 </template>
