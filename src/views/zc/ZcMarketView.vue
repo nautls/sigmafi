@@ -86,12 +86,6 @@ const EMPTY_BOOK: ZcOrderbook = {
 const zc = useZcStore();
 const route = useRoute();
 
-const section = computed(() => {
-  if (route.name === "zc-auctions") return "auctions";
-  if (route.name === "zc-portfolio") return "portfolio";
-  return "market";
-});
-
 /* ============================================================
    Rate Book Filter & View State
    ============================================================ */
@@ -263,7 +257,6 @@ async function resolveCollateralTokens(asks: ZcAskSummary[]) {
 let fetchAc: AbortController | null = null;
 
 async function fetchRateBook() {
-  if (section.value !== "market") return;
   if (fetchAc) fetchAc.abort();
 
   if (!zc.connected) {
@@ -396,7 +389,6 @@ async function fetchRateBook() {
 
 watch(
   [
-    section,
     () => zc.connected,
     () => zc.revision,
     () => zc.refreshSeq,
@@ -690,10 +682,7 @@ const pulse = computed(() => {
   <!-- ========================================================
        RATE BOOK TRADING WORKSPACE (/app) — Single-Screen Desktop
        ======================================================== -->
-  <div
-    v-if="section === 'market'"
-    class="flex min-h-0 flex-1 flex-col gap-3"
-  >
+  <div class="flex min-h-0 flex-1 flex-col gap-3">
     <!-- Unified Market Telemetry + Precision Control Ribbon -->
     <section
       class="sf-terminal-plate flex shrink-0 flex-wrap items-center justify-between gap-x-3 gap-y-2 rounded-[16px] rounded-tl-[5px] px-3 py-2 sm:px-3.5"
@@ -1134,96 +1123,5 @@ const pulse = computed(() => {
         @close="previewPayload = null"
       />
     </transition>
-  </div>
-
-  <!-- ========================================================
-       AUCTIONS WORKSPACE (/app/auctions) — Placeholder for Next Slice
-       ======================================================== -->
-  <div v-else-if="section === 'auctions'" class="space-y-6">
-    <div>
-      <h1 class="sf-display text-[30px] font-bold text-[color:var(--sf-ink)]">Auctions</h1>
-      <p class="mt-1 text-[13px] text-[color:var(--sf-muted)]">
-        Linear falling-price Dutch sale lots and post-liquidation share vault auctions.
-      </p>
-    </div>
-
-    <div class="grid grid-cols-1 gap-6 md:grid-cols-2">
-      <section class="sf-terminal-plate rounded-[20px] rounded-tl-[6px] p-6">
-        <div class="flex items-center justify-between border-b border-[color:var(--sf-line)] pb-3.5">
-          <h2 class="sf-display text-[18px] font-semibold">Sale Auctions</h2>
-          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">
-            {{ zc.lots.length }}
-          </span>
-        </div>
-        <div v-if="zc.lots.length" class="divide-y divide-[color:var(--sf-line)]">
-          <div
-            v-for="lot in zc.lots"
-            :key="lot.boxId"
-            class="flex items-center justify-between py-3 text-[13px]"
-          >
-            <div>
-              <span class="sf-mono font-medium text-[color:var(--sf-ink)]">
-                {{ shortenString(lot.boxId, 12) }}
-              </span>
-              <span class="sf-mono ml-2 text-[11px] text-[color:var(--sf-muted)]">
-                {{ lot.itemCount }} items · {{ lot.phase }}
-              </span>
-            </div>
-            <span class="sf-mono font-semibold text-[color:var(--sf-ask)]">
-              {{ formatMarketAmount(lot.priceNow, lot.market) }}
-            </span>
-          </div>
-        </div>
-        <div v-else class="py-10 text-center text-[13px] text-[color:var(--sf-muted)]">
-          No active sale auctions.
-        </div>
-      </section>
-
-      <section class="sf-terminal-plate rounded-[20px] rounded-tr-[6px] p-6">
-        <div class="flex items-center justify-between border-b border-[color:var(--sf-line)] pb-3.5">
-          <h2 class="sf-display text-[18px] font-semibold">Liquidation Auctions</h2>
-          <span class="sf-mono text-[12px] font-semibold text-[color:var(--sf-ask)]">
-            {{ zc.vaults.length }}
-          </span>
-        </div>
-        <div v-if="zc.vaults.length" class="divide-y divide-[color:var(--sf-line)]">
-          <div
-            v-for="v in zc.vaults"
-            :key="v.boxId"
-            class="flex items-center justify-between py-3 text-[13px]"
-          >
-            <div>
-              <span class="sf-mono font-medium text-[color:var(--sf-ink)]">
-                {{ shortenString(v.bondId, 12) }}
-              </span>
-              <span class="sf-mono ml-2 text-[11px] text-[color:var(--sf-muted)]">
-                {{ v.vaultType }} vault
-              </span>
-            </div>
-            <span class="sf-mono font-semibold text-[color:var(--sf-ask)]">
-              {{ formatMarketAmount(v.payNow, v.market) }}
-            </span>
-          </div>
-        </div>
-        <div v-else class="py-10 text-center text-[13px] text-[color:var(--sf-muted)]">
-          No active liquidation auctions.
-        </div>
-      </section>
-    </div>
-  </div>
-
-  <!-- ========================================================
-       PORTFOLIO WORKSPACE (/app/portfolio) — Placeholder for Next Slice
-       ======================================================== -->
-  <div v-else class="space-y-6">
-    <div>
-      <h1 class="sf-display text-[30px] font-bold text-[color:var(--sf-ink)]">Portfolio</h1>
-      <p class="mt-1 text-[13px] text-[color:var(--sf-muted)]">
-        Track active ZC lending positions, collateralized loans, open orders, and custody wraps.
-      </p>
-    </div>
-    <div class="sf-terminal-plate rounded-[20px] p-8 text-[14px] text-[color:var(--sf-muted)]">
-      Connect Nautilus to view your on-chain ZC positions and open orders.
-    </div>
   </div>
 </template>

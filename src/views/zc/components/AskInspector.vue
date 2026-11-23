@@ -11,6 +11,7 @@ import {
 import { computed, ref, watch } from "vue";
 import CoverMeter from "./CoverMeter.vue";
 import { ExecutionPreviewPayload } from "./ExecutionPreviewModal.vue";
+import ZcAssetChip from "./ZcAssetChip.vue";
 import { ZcAskSummary, ZcCurves, ZcDurationUnit } from "@/types/zc";
 import { shortenString } from "@/utils";
 import {
@@ -904,10 +905,13 @@ function openPreview() {
               <span>SigUSD</span>
               <span class="font-semibold">{{ formatNumber(collateral.usd, 2, 2) }} SigUSD</span>
             </div>
-            <div v-for="tok in collateral.tokens" :key="tok.id" class="flex justify-between">
-              <span class="truncate">{{ tok.ticker }}</span>
-              <span class="font-semibold">{{ formatNumber(tok.amount, 2, 0) }}</span>
-            </div>
+            <zc-asset-chip
+              v-for="tok in collateral.tokens"
+              :key="tok.id"
+              :token="tok"
+              :height="height"
+              variant="inline"
+            />
             <div
               v-if="collateral.erg <= 0.0011 && collateral.usd <= 0 && !collateral.tokens.length"
               class="text-[color:var(--sf-dim)]"

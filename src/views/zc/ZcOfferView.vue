@@ -134,16 +134,18 @@ async function loadOffer() {
 }
 
 watch(
-  [targetId, () => zc.connected, () => zc.revision],
+  [targetId, () => zc.connected, () => zc.revision, () => zc.demoMode],
   () => {
-    if (zc.connected) void loadOffer();
+    if (zc.connected || zc.demoMode) void loadOffer();
   },
   { immediate: true }
 );
 
 onBeforeUnmount(() => loadAc?.abort());
 
-const height = computed(() => zc.height);
+const height = computed(() =>
+  zc.height > 100_000 ? zc.height : zc.demoMode ? 1_650_000 : zc.height
+);
 const unit = computed(() => zc.durationUnit);
 
 const buys = computed(() => matches.value?.buys || matches.value?.matches || []);

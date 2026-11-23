@@ -300,6 +300,13 @@ const navItems = [
               >
                 {{ zc.auctionsCount }}
               </span>
+              <span
+                v-else-if="item.name === 'zc-portfolio' && zc.portfolio.attentionCount > 0"
+                class="sf-mono rounded-[4px] bg-[color:var(--sf-warn-soft)] px-1.5 py-[1px] text-[10px] font-semibold text-[color:var(--sf-warn)]"
+                :title="`${zc.portfolio.attentionCount} position${zc.portfolio.attentionCount === 1 ? '' : 's'} need attention`"
+              >
+                {{ zc.portfolio.attentionCount }}
+              </span>
             </router-link>
           </nav>
 
@@ -431,6 +438,31 @@ const navItems = [
               Blk
             </button>
           </div>
+
+          <!-- Demo / Mock Data Toggle (commented out for now; uncomment to preview mock Auctions/Portfolio/Bonds)
+          <button
+            type="button"
+            class="sf-mono inline-flex h-8 items-center gap-1.5 rounded-xl border px-2.5 text-[11px] font-semibold transition-all"
+            :class="
+              zc.demoMode
+                ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)] shadow-[0_0_16px_rgba(var(--sf-cobalt-rgb),0.18)]'
+                : 'border-[color:var(--sf-line)] bg-[color:var(--sf-card)] text-[color:var(--sf-muted)] hover:border-[color:var(--sf-line-strong)] hover:text-[color:var(--sf-ink)]'
+            "
+            :aria-pressed="zc.demoMode"
+            :title="
+              zc.demoMode
+                ? 'Demo dataset active — click to switch back to live on-chain data'
+                : 'Load sample Auctions, Portfolio, Bond & Offer data for previewing'
+            "
+            @click="zc.toggleDemoMode()"
+          >
+            <span
+              class="h-1.5 w-1.5 rounded-full transition-colors"
+              :class="zc.demoMode ? 'bg-[color:var(--sf-cobalt)]' : 'bg-[color:var(--sf-dim)]'"
+            />
+            <span>Demo</span>
+          </button>
+          -->
 
           <!-- Blockchain Feed Pill + Popover (Explorer REST + GraphQL) -->
           <div ref="feedRef" class="relative" @keydown.esc="feedOpen = false">
@@ -640,6 +672,12 @@ const navItems = [
             class="sf-mono rounded bg-[color:var(--sf-cobalt-soft)] px-1 text-[10px] text-[color:var(--sf-cobalt)]"
           >
             {{ zc.auctionsCount }}
+          </span>
+          <span
+            v-else-if="item.name === 'zc-portfolio' && zc.portfolio.attentionCount > 0"
+            class="sf-mono rounded bg-[color:var(--sf-warn-soft)] px-1 text-[10px] text-[color:var(--sf-warn)]"
+          >
+            {{ zc.portfolio.attentionCount }}
           </span>
         </router-link>
       </nav>

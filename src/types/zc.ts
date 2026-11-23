@@ -137,14 +137,32 @@ export interface ZcQuote {
   validThrough?: number;
 }
 
+export interface ZcWrappedTokenInfo {
+  id: string;
+  ticker: string;
+  name: string | null;
+  description: string | null;
+  decimals: number;
+  amount: number;
+  rawAmount: string;
+  kind?: "token" | "provision" | "bond" | "shares";
+  bondId?: string | null;
+  vaultBoxId?: string | null;
+  refreshFrom?: number | null;
+  state?: string | null;
+}
+
 export interface ZcCollateralToken {
   id: string;
   ticker: string;
   name: string | null;
+  description?: string | null;
   decimals: number;
   amount: number;
   rawAmount: string;
   kind: "token" | "provision" | "receipt" | "bond" | "shares";
+  bondId?: string | null;
+  wraps?: ZcWrappedTokenInfo | null;
   verified?: boolean;
 }
 
@@ -443,10 +461,13 @@ export interface ZcWalletToken {
   id: string;
   ticker: string;
   name: string | null;
+  description?: string | null;
   decimals: number;
   amount: number;
   rawAmount: string;
   kind: "token" | "provision" | "receipt" | "bond" | "shares";
+  bondId?: string | null;
+  wraps?: ZcWrappedTokenInfo | null;
   verified?: boolean;
   unverified?: boolean;
   usd?: number | null;
@@ -482,6 +503,7 @@ export interface ZcPortfolioPosition {
   paid?: number | null;
   at?: number | null;
   via?: string | null;
+  vaultId?: string | null;
   mark?: {
     basis: string;
     bid: number | null;
@@ -494,6 +516,13 @@ export interface ZcPortfolioPosition {
   settlement?: Record<string, number> | null;
 }
 
+export interface ZcPortfolioMintRequest {
+  id: string;
+  boxId: string;
+  bondId: string;
+  pending?: boolean;
+}
+
 export interface ZcPortfolioWrap {
   id: string;
   boxId?: string;
@@ -502,6 +531,7 @@ export interface ZcPortfolioWrap {
   receipt: ZcWalletToken;
   token: ZcWalletToken;
   state: "requested" | "wrapped" | string;
+  refreshFrom?: number | null;
   pending?: boolean;
   inWallet: boolean;
 }
@@ -516,7 +546,10 @@ export interface ZcPortfolioState {
   openOrders: ZcAskSummary[];
   openAsks: ZcAskSummary[];
   openOffers: ZcOfferSummary[];
+  openLots: ZcAuctionLotSummary[];
+  mintRequests: ZcPortfolioMintRequest[];
   wraps: ZcPortfolioWrap[];
+  attentionCount: number;
 }
 
 export interface ZcSearchHit {
@@ -549,23 +582,50 @@ export interface ZcMarketSnapshot {
 }
 
 export interface ZcAuctionLotSummary {
+  id: string;
   boxId: string;
+  chainId?: string;
   market: ZcMarket;
   opening: number;
   floor: number;
+  start: number;
+  end: number;
+  expiry: number;
+  refundFee: number;
+  erg: number;
+  items: ZcCollateralToken[];
   priceNow: number | null;
-  phase: string;
+  phase: "before" | "falling" | "floor" | "expired" | string;
   itemCount: number;
+  valid: boolean;
+  owner: boolean;
+  borrowedByMe: boolean;
+  borrowedBondIds: string[];
   pending: boolean;
 }
 
 export interface ZcAuctionVaultSummary {
+  id: string;
   boxId: string;
+  shareTokenId?: string;
   bondId: string;
   market: ZcMarket;
-  vaultType: string;
+  vaultType: "selective" | "dutch" | string;
   state: number;
   repayment: number;
+  openBps: number;
+  floorBps: number;
+  length: number;
+  expiry: number;
+  start: number;
+  currencyHeld: number;
+  items: ZcCollateralToken[];
   payNow: number | null;
+  quote: {
+    pay: number | null;
+    target: number | null;
+    bps: number | null;
+    done: boolean;
+  };
   pending: boolean;
 }

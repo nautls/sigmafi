@@ -6,6 +6,7 @@ import { useChainStore } from "./chainStore";
 import { useWalletStore } from "./walletStore";
 import { ERG_TOKEN_ID } from "@/constants";
 import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
+import { buildMockDataset, ZcDemoDataset } from "@/services/zc/mockData";
 import {
   adaptPortfolio,
   getDefaultZcExplorerUrl,
@@ -17,6 +18,7 @@ import {
   resetZcEngine,
   setZcBaseUrl,
   setZcDataSource,
+  setZcDemoProvider,
   setZcExplorerUrl,
   setZcGraphqlUrl,
   setZcWalletProvider,
@@ -166,6 +168,37 @@ export const useZcStore = defineStore("zc", () => {
   const lots = ref<ZcAuctionLotSummary[]>([]);
   const vaults = ref<ZcAuctionVaultSummary[]>([]);
 
+  const DEMO_STORAGE_KEY = "sigmafi.zc.demoMode";
+  // Starts disabled while the UI Demo toggle is commented out; restore sessionStorage read when re-enabling
+  const demoMode = ref<boolean>(false);
+
+  const demoData = computed<ZcDemoDataset | null>(() =>
+    demoMode.value ? buildMockDataset(height.value, oracle.price) : null
+  );
+
+  setZcDemoProvider(() => demoData.value);
+
+  function setDemoMode(val: boolean) {
+    demoMode.value = val;
+    try {
+      sessionStorage.setItem(DEMO_STORAGE_KEY, val ? "1" : "0");
+    } catch {
+      // ignore
+    }
+    if (val) {
+      applyDemoData();
+    } else {
+      lots.value = [];
+      vaults.value = [];
+      void poll(true);
+      void refreshPortfolio();
+    }
+  }
+
+  function toggleDemoMode() {
+    setDemoMode(!demoMode.value);
+  }
+
   const portfolio = reactive<ZcPortfolioState>({
     loaded: false,
     loading: false,
@@ -176,10 +209,37 @@ export const useZcStore = defineStore("zc", () => {
     openOrders: [],
     openAsks: [],
     openOffers: [],
-    wraps: []
+    openLots: [],
+    mintRequests: [],
+    wraps: [],
+    attentionCount: 0
   });
 
+  function applyDemoData() {
+    const d = demoData.value;
+    if (!d) return;
+    lots.value = d.lots;
+    vaults.value = d.vaults;
+    portfolio.loaded = true;
+    portfolio.loading = false;
+    portfolio.walletErg = d.portfolio.walletErg;
+    portfolio.walletSigUsd = d.portfolio.walletSigUsd;
+    portfolio.walletTokens = d.portfolio.walletTokens;
+    portfolio.positions = d.portfolio.positions;
+    portfolio.openOrders = d.portfolio.openOrders;
+    portfolio.openAsks = d.portfolio.openAsks;
+    portfolio.openOffers = d.portfolio.openOffers;
+    portfolio.openLots = d.portfolio.openLots;
+    portfolio.mintRequests = d.portfolio.mintRequests;
+    portfolio.wraps = d.portfolio.wraps;
+    portfolio.attentionCount = d.portfolio.attentionCount;
+  }
+
   async function refreshPortfolio() {
+    if (demoMode.value) {
+      applyDemoData();
+      return;
+    }
     if (!wallet.connected || !connected.value) {
       portfolio.loaded = false;
       portfolio.loading = false;
@@ -190,7 +250,10 @@ export const useZcStore = defineStore("zc", () => {
       portfolio.openOrders = [];
       portfolio.openAsks = [];
       portfolio.openOffers = [];
+      portfolio.openLots = [];
+      portfolio.mintRequests = [];
       portfolio.wraps = [];
+      portfolio.attentionCount = 0;
       return;
     }
     portfolio.loading = true;
@@ -255,7 +318,12 @@ export const useZcStore = defineStore("zc", () => {
       portfolio.openOrders = adapted.openOrders;
       portfolio.openAsks = adapted.openAsks;
       portfolio.openOffers = adapted.openOffers;
+      portfolio.openLots = lots.value.filter(
+        (l) => l.owner || adapted.openLotIds.includes(l.boxId)
+      );
+      portfolio.mintRequests = adapted.mintRequests;
       portfolio.wraps = adapted.wraps;
+      portfolio.attentionCount = adapted.attentionCount;
       portfolio.loaded = true;
     } catch {
       // fail-soft
@@ -437,12 +505,43 @@ export const useZcStore = defineStore("zc", () => {
         const [, , auctions] = await Promise.all([
           fetchMarket("ERG"),
           fetchMarket("SigUSD"),
-          zcApi.listAuctions().catch(() => ({ lots: [], vaults: [] }))
+          demoMode.value
+            ? Promise.resolve({ lots: demoData.value?.lots || [], vaults: demoData.value?.vaults || [] })
+            : zcApi.listAuctions().catch(() => ({ lots: [], vaults: [] }))
         ]);
-        lots.value = auctions.lots;
-        vaults.value = auctions.vaults;
-        if (wallet.connected) {
-          void refreshPortfolio();
+        if (demoMode.value) {
+          applyDemoData();
+        } else {
+          // Resolve auction item metadata for unknown tokens
+          const auctionTokenIds = new Set<string>();
+          for (const l of auctions.lots) {
+            for (const it of l.items) if (isHex64(it.id)) auctionTokenIds.add(it.id);
+          }
+          for (const v of auctions.vaults) {
+            for (const it of v.items) if (isHex64(it.id)) auctionTokenIds.add(it.id);
+          }
+          if (auctionTokenIds.size > 0) {
+            try {
+              const tMap = await zcApi.lookupAssets(Array.from(auctionTokenIds).slice(0, 50));
+              if (Object.keys(tMap).length > 0) {
+                const enriched = await zcApi.listAuctions(tMap);
+                lots.value = enriched.lots;
+                vaults.value = enriched.vaults;
+              } else {
+                lots.value = auctions.lots;
+                vaults.value = auctions.vaults;
+              }
+            } catch {
+              lots.value = auctions.lots;
+              vaults.value = auctions.vaults;
+            }
+          } else {
+            lots.value = auctions.lots;
+            vaults.value = auctions.vaults;
+          }
+          if (wallet.connected) {
+            void refreshPortfolio();
+          }
         }
 
         // If the user hasn't chosen a market yet, highlight whichever market has live activity.
@@ -492,6 +591,7 @@ export const useZcStore = defineStore("zc", () => {
   function start() {
     subscribers += 1;
     if (subscribers === 1) {
+      if (demoMode.value) applyDemoData();
       void poll(false);
       pollTimer = window.setInterval(() => {
         void poll(false);
@@ -534,6 +634,7 @@ export const useZcStore = defineStore("zc", () => {
     lots,
     vaults,
     portfolio,
+    demoMode,
     auctionsCount,
     totalOpenOffersUsd,
     totalOpenAsksUsd,
@@ -541,6 +642,8 @@ export const useZcStore = defineStore("zc", () => {
     totalOrdersCount,
     setActiveMarket,
     setDurationUnit,
+    setDemoMode,
+    toggleDemoMode,
     updateDataSource,
     updateExplorerUrl,
     updateGraphqlUrl,

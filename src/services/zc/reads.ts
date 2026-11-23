@@ -14,6 +14,7 @@ import {
   ZcRecord,
   ZcShareVault
 } from "./boxes";
+import { ChainTransaction, ZcChainClient } from "./chainClient";
 import {
   getZcScript,
   getZcScriptAddress,
@@ -29,7 +30,6 @@ import {
 } from "./contracts";
 import { simulateDraft } from "./drafts";
 import { ZcApiError } from "./errors";
-import { ChainTransaction, ZcChainClient } from "./chainClient";
 import { DEFAULT_MAINNET_EXPLORER_URL, ZcExplorerClient } from "./explorerClient";
 import { DEFAULT_MAINNET_GRAPHQL_URL, ZcGraphqlClient } from "./graphqlClient";
 import { buildAtMeta, toSafeNum, ZcJson, ZcKnown, ZcStanding } from "./json";
@@ -1093,6 +1093,7 @@ export class ZcGraphqlEngine {
     }
 
     bids.sort((a, b) => cmpBigAsc(a.bpsBig, b.bpsBig) || cmpStr(a.boxId, b.boxId));
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trimmedBids = bids.slice(0, MAX_BOOK_ROWS).map(({ bpsBig: _ignored, ...rest }) => rest);
 
     // Helper: find tightest pointwise same-maturity spread for a window order within [lo, hi]
@@ -1224,6 +1225,7 @@ export class ZcGraphqlEngine {
     }
 
     asks.sort((a, b) => cmpBigDesc(a.bpsBig, b.bpsBig) || cmpStr(a.boxId, b.boxId));
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars
     const trimmedAsks = asks.slice(0, MAX_BOOK_ROWS).map(({ bpsBig: _ignored, ...rest }) => rest);
 
     let bestAsk: number | null = null;
@@ -2170,6 +2172,24 @@ export class ZcGraphqlEngine {
     const matcher = this.buildMatcher(snap.book);
     const json = new ZcJson(matcher, known);
 
+    // Resolve underlying wrapped tokens so wrap receipts expose real inner token ID, name & description
+    const innerTokenIds = new Set<string>();
+    for (const id of ids) {
+      const origin = this.resolver.knownOrigin(id);
+      const wrapVault = snap.book.wrapVaults.get(id);
+      const innerId = wrapVault?.record.wrapped.tokenId ?? origin?.held?.tokenId ?? null;
+      if (innerId && /^[0-9a-f]{64}$/i.test(innerId)) {
+        innerTokenIds.add(innerId.toLowerCase());
+      }
+    }
+    if (innerTokenIds.size > 0) {
+      const innerList = Array.from(innerTokenIds);
+      await Promise.all([
+        this.resolver.resolveTokens(innerList, snap.book.height, signal).catch(() => undefined),
+        this.resolver.resolveOrigins(innerList, snap.book.height, signal).catch(() => undefined)
+      ]);
+    }
+
     const tokens: Record<string, unknown> = {};
     for (const id of ids) {
       const origin = this.resolver.knownOrigin(id);
@@ -2190,27 +2210,68 @@ export class ZcGraphqlEngine {
       }
 
       const wrapVault = snap.book.wrapVaults.get(id);
-      const wrap =
-        kind === "wrapReceipt"
-          ? wrapVault
-            ? json.wrapJson(wrapVault.record)
-            : origin?.held
+      let wrap: Record<string, unknown> | null = null;
+      if (kind === "wrapReceipt") {
+        const baseWrap = wrapVault
+          ? json.wrapJson(wrapVault.record)
+          : origin?.held
+            ? {
+                token: origin.held.tokenId,
+                amount: origin.held.amount.toString(),
+                state: "requested"
+              }
+            : null;
+        if (baseWrap) {
+          const innerId = String(baseWrap.token || "").toLowerCase();
+          const innerInfo = innerId ? this.resolver.knownToken(innerId) : null;
+          const innerOrig = innerId ? this.resolver.knownOrigin(innerId) : null;
+          let innerKind = "token";
+          let innerBondId: string | null = null;
+          if (innerOrig) {
+            if (innerOrig.kind === "Order" || innerOrig.kind === "PricedOrder") {
+              innerKind = "bond";
+              innerBondId = innerId;
+            } else if (innerOrig.kind === "FractionalMint" || innerOrig.kind === "DutchAuctionMint") {
+              innerKind = "shares";
+              innerBondId = snap.book.shareVaults.get(innerId)?.record.bondAsset ?? innerOrig.held?.tokenId ?? null;
+            }
+          }
+          wrap = {
+            ...baseWrap,
+            innerToken: innerId
               ? {
-                  token: origin.held.tokenId,
-                  amount: origin.held.amount.toString(),
-                  state: "requested"
+                  id: innerId,
+                  name: innerInfo?.name ?? null,
+                  decimals: innerInfo?.decimals ?? 0,
+                  description: innerInfo?.description ?? null,
+                  kind: innerKind,
+                  bondId: innerBondId
                 }
               : null
-          : null;
+          };
+        }
+      }
+
+      const sharesObj = kind === "shares" ? json.sharesJson(id) : null;
+      const bondId =
+        kind === "bondUnit"
+          ? id
+          : kind === "shares"
+            ? (sharesObj && typeof sharesObj.bondId === "string"
+                ? sharesObj.bondId
+                : origin?.held?.tokenId ?? null)
+            : null;
 
       tokens[id] = {
         id,
         name: info?.name ?? null,
+        description: info?.description ?? null,
         decimals: info?.decimals ?? null,
         verified: kind !== "token",
         kind,
+        bondId,
         bond: kind === "bondUnit" ? json.bondJson(id) : null,
-        shares: kind === "shares" ? json.sharesJson(id) : null,
+        shares: sharesObj,
         wrap,
         provision: null,
         displayPrice: null

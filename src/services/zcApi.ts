@@ -30,12 +30,14 @@ import {
   ZcOfferSummary,
   ZcOrderbook,
   ZcPagedResult,
+  ZcPortfolioMintRequest,
   ZcPortfolioPosition,
   ZcPortfolioWrap,
   ZcRawCurvesResponse,
   ZcSearchHit,
   ZcSimulateResponse,
-  ZcWalletToken
+  ZcWalletToken,
+  ZcWrappedTokenInfo
 } from "@/types/zc";
 import { getNetworkType } from "@/utils/otherUtils";
 import {
@@ -77,10 +79,29 @@ const VERIFIED_META_BY_ID = new Map(
 export interface ZcTokenMeta {
   id: string;
   ticker?: string;
-  name?: string;
-  decimals?: number;
+  name?: string | null;
+  description?: string | null;
+  decimals?: number | null;
   verified?: boolean;
   kind?: string;
+  bondId?: string | null;
+  shares?: { bondId?: string | null } | null;
+  wrap?: {
+    receiptId?: string;
+    token?: string;
+    amount?: string;
+    vaultBoxId?: string;
+    state?: string;
+    refreshFrom?: number | null;
+    innerToken?: {
+      id?: string;
+      name?: string | null;
+      decimals?: number | null;
+      description?: string | null;
+      kind?: string;
+      bondId?: string | null;
+    } | null;
+  } | null;
 }
 
 export function getDefaultZcExplorerUrl(): string {
@@ -216,6 +237,24 @@ export function setZcWalletProvider(provider: ZcWalletProvider): void {
   zcGraphqlEngine.setWalletProvider(provider);
 }
 
+let demoLookupProvider:
+  | (() => {
+      lookupById: Map<string, ZcLookupResult>;
+      matchesById: Map<string, ZcMatchesResponse>;
+    } | null)
+  | null = null;
+
+export function setZcDemoProvider(
+  provider:
+    | (() => {
+        lookupById: Map<string, ZcLookupResult>;
+        matchesById: Map<string, ZcMatchesResponse>;
+      } | null)
+    | null
+): void {
+  demoLookupProvider = provider;
+}
+
 export function resetZcEngine(): void {
   zcGraphqlEngine.reset();
 }
@@ -290,6 +329,119 @@ async function lithosRequest<T>(
   return json as T;
 }
 
+function buildWrappedInfo(
+  meta: ZcTokenMeta | undefined,
+  tokenMap: Record<string, ZcTokenMeta>
+): ZcWrappedTokenInfo | null {
+  const w = meta?.wrap;
+  const innerId = String(w?.innerToken?.id || w?.token || "").toLowerCase();
+  if (!innerId) return null;
+  const innerMeta = tokenMap[innerId];
+  const known = VERIFIED_META_BY_ID.get(innerId);
+  const decimals =
+    w?.innerToken?.decimals ??
+    innerMeta?.decimals ??
+    known?.decimals ??
+    (innerId === SIGUSD_TOKEN_ID ? 2 : innerId === LIT_TOKEN_ID ? 9 : 0);
+  const name = w?.innerToken?.name || innerMeta?.name || known?.name || null;
+  const ticker =
+    name ||
+    innerMeta?.ticker ||
+    (innerId === SIGUSD_TOKEN_ID
+      ? "SigUSD"
+      : innerId === LIT_TOKEN_ID
+        ? "LIT"
+        : `${innerId.slice(0, 8)}…`);
+  const rawAmt = String(w?.amount ?? "1");
+  const rawKind = w?.innerToken?.kind || innerMeta?.kind;
+  const kind: ZcWrappedTokenInfo["kind"] =
+    rawKind === "bond" || rawKind === "bondUnit"
+      ? "bond"
+      : rawKind === "shares"
+        ? "shares"
+        : rawKind === "provision"
+          ? "provision"
+          : "token";
+  return {
+    id: innerId,
+    ticker,
+    name,
+    description: w?.innerToken?.description ?? innerMeta?.description ?? null,
+    decimals,
+    amount: fromRaw(rawAmt, decimals) ?? 1,
+    rawAmount: rawAmt,
+    kind,
+    bondId: w?.innerToken?.bondId ?? innerMeta?.bondId ?? null,
+    vaultBoxId: w?.vaultBoxId ?? null,
+    refreshFrom: typeof w?.refreshFrom === "number" ? w.refreshFrom : null,
+    state: w?.state ?? "wrapped"
+  };
+}
+
+function buildCollateralToken(
+  idRaw: string,
+  rawAmount: unknown,
+  rawKind: string | undefined,
+  tokenMap: Record<string, ZcTokenMeta>
+): ZcCollateralToken {
+  const id = String(idRaw || "").toLowerCase();
+  const meta = tokenMap[id];
+  const knownMeta = VERIFIED_META_BY_ID.get(id);
+  const resolvedKind = rawKind || meta?.kind;
+  const kind: ZcCollateralToken["kind"] =
+    resolvedKind === "wrapReceipt" || resolvedKind === "receipt"
+      ? "receipt"
+      : resolvedKind === "provision"
+        ? "provision"
+        : resolvedKind === "bondUnit" || resolvedKind === "bond"
+          ? "bond"
+          : resolvedKind === "shares"
+            ? "shares"
+            : "token";
+  const decimals =
+    kind === "receipt" || kind === "bond"
+      ? 0
+      : kind === "shares"
+        ? 6
+        : meta?.decimals ?? knownMeta?.decimals ?? (id === SIGUSD_TOKEN_ID ? 2 : id === LIT_TOKEN_ID ? 9 : 0);
+  const wraps = kind === "receipt" ? buildWrappedInfo(meta, tokenMap) : null;
+  const bondId =
+    kind === "bond"
+      ? meta?.bondId || id
+      : kind === "shares"
+        ? meta?.bondId || meta?.shares?.bondId || id
+        : null;
+  const ticker =
+    meta?.ticker ||
+    meta?.name ||
+    knownMeta?.name ||
+    (id === SIGUSD_TOKEN_ID
+      ? "SigUSD"
+      : id === LIT_TOKEN_ID
+        ? "LIT"
+        : kind === "receipt"
+          ? `ZCS-Wrap-${id.slice(0, 6)}`
+          : kind === "bond"
+            ? `Bond ${id.slice(0, 6)}…`
+            : kind === "shares"
+              ? `Shares ${id.slice(0, 6)}…`
+              : `${id.slice(0, 6)}…`);
+
+  return {
+    id,
+    ticker,
+    name: meta?.name || knownMeta?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
+    description: meta?.description ?? null,
+    decimals,
+    amount: fromRaw(String(rawAmount ?? "0"), decimals) ?? Number(rawAmount || 0),
+    rawAmount: String(rawAmount ?? "0"),
+    kind,
+    bondId,
+    wraps,
+    verified: kind === "receipt" || kind === "bond" || kind === "shares" || !!meta?.verified || !!knownMeta
+  };
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function adaptCollateral(col: any, tokenMap: Record<string, ZcTokenMeta> = {}): ZcCollateral {
   if (!col) return { erg: 0, usd: 0, tokens: [] };
@@ -301,32 +453,7 @@ function adaptCollateral(col: any, tokenMap: Record<string, ZcTokenMeta> = {}): 
     if (id === SIGUSD_TOKEN_ID) {
       usd += fromRaw(t.amount, 2) ?? 0;
     } else {
-      const meta = tokenMap[id];
-      const knownMeta = VERIFIED_META_BY_ID.get(id);
-      const decimals = meta?.decimals ?? knownMeta?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
-      tokens.push({
-        id,
-        ticker:
-          meta?.ticker ||
-          meta?.name ||
-          knownMeta?.name ||
-          (id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
-        name: meta?.name || knownMeta?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
-        decimals,
-        amount: fromRaw(t.amount, decimals) ?? 0,
-        rawAmount: String(t.amount ?? "0"),
-        kind:
-          meta?.kind === "wrapReceipt"
-            ? "receipt"
-            : meta?.kind === "provision"
-              ? "provision"
-              : meta?.kind === "bondUnit"
-                ? "bond"
-                : meta?.kind === "shares"
-                  ? "shares"
-                  : "token",
-        verified: meta?.verified
-      });
+      tokens.push(buildCollateralToken(id, t.amount, t.kind, tokenMap));
     }
   }
   return { erg, usd, tokens };
@@ -1077,7 +1204,10 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
       openOrders: [] as ZcAskSummary[],
       openAsks: [] as ZcAskSummary[],
       openOffers: [] as ZcOfferSummary[],
-      wraps: [] as ZcPortfolioWrap[]
+      openLotIds: [] as string[],
+      mintRequests: [] as ZcPortfolioMintRequest[],
+      wraps: [] as ZcPortfolioWrap[],
+      attentionCount: 0
     };
   }
 
@@ -1101,10 +1231,12 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
           known?.name ||
           (isReceipt ? `ZCS-Wrap-${id.slice(0, 6)}` : id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
         name: meta?.name || known?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
+        description: meta?.description ?? null,
         decimals,
         amount: isReceipt ? Number(t.amount || 1) : fromRaw(t.amount, decimals) ?? 0,
         rawAmount: String(t.amount ?? "0"),
         kind: isReceipt ? "receipt" : "token",
+        wraps: isReceipt ? buildWrappedInfo(meta, tokenMap) : null,
         verified: isReceipt || !!meta?.verified || !!known,
         unverified: !isReceipt && !known && meta != null && !meta.verified
       });
@@ -1150,6 +1282,7 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
       paid: item.cost?.paid != null ? fromMarket(item.cost.paid, market) : null,
       at: item.cost?.height ?? null,
       via: item.cost?.viaOffer ?? null,
+      vaultId: item.shares?.vault?.boxId ?? null,
       mark: item.mark
         ? {
             basis: item.mark.basis,
@@ -1200,6 +1333,7 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
         id: tid,
         ticker: meta?.ticker || meta?.name || `${tid.slice(0, 6)}…`,
         name: meta?.name || null,
+        description: meta?.description ?? null,
         decimals: meta?.decimals ?? 0,
         amount: 1,
         rawAmount: "1",
@@ -1216,6 +1350,16 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
           amount: 1,
           rawAmount: "1",
           kind: "receipt",
+          wraps: {
+            id: inner.id,
+            ticker: inner.ticker,
+            name: inner.name,
+            description: inner.description ?? null,
+            decimals: inner.decimals,
+            amount: inner.amount,
+            rawAmount: inner.rawAmount,
+            state: "requested"
+          },
           verified: true
         },
         token: inner,
@@ -1233,11 +1377,13 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
         id: tid,
         ticker: meta?.ticker || meta?.name || `${tid.slice(0, 6)}…`,
         name: meta?.name || null,
+        description: meta?.description ?? null,
         decimals: meta?.decimals ?? 0,
         amount: fromRaw(w.amount ?? "1", meta?.decimals ?? 0) ?? 1,
         rawAmount: String(w.amount ?? "1"),
         kind: "token"
       };
+      const refreshFrom = typeof w.refreshFrom === "number" ? w.refreshFrom : null;
       return {
         id: rid,
         receiptId: rid,
@@ -1250,14 +1396,38 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
           amount: 1,
           rawAmount: "1",
           kind: "receipt",
+          wraps: {
+            id: inner.id,
+            ticker: inner.ticker,
+            name: inner.name,
+            description: inner.description ?? null,
+            decimals: inner.decimals,
+            amount: inner.amount,
+            rawAmount: inner.rawAmount,
+            vaultBoxId: w.vaultBoxId ?? null,
+            refreshFrom,
+            state: w.state || "wrapped"
+          },
           verified: true
         },
         token: inner,
         state: w.state || "wrapped",
+        refreshFrom,
         inWallet: !!w.inWallet
       };
     })
   ];
+
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const openLotIds: string[] = (raw.open?.lots || []).map((l: any) => String(l.boxId || ""));
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const mintRequests: ZcPortfolioMintRequest[] = (raw.open?.mintRequests || []).map((r: any) => ({
+    id: String(r.boxId || ""),
+    boxId: String(r.boxId || ""),
+    bondId: String(r.bondId || ""),
+    pending: !!r.pending
+  }));
+  const attentionCount = Number(raw.attention?.borrowing ?? 0);
 
   return {
     walletErg,
@@ -1267,7 +1437,10 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
     openOrders,
     openAsks,
     openOffers,
-    wraps
+    openLotIds,
+    mintRequests,
+    wraps,
+    attentionCount
   };
 }
 
@@ -1461,6 +1634,8 @@ export const zcApi = {
   },
 
   async getMatches(id: string, signal?: AbortSignal): Promise<ZcMatchesResponse> {
+    const demoHit = demoLookupProvider?.()?.matchesById.get(id.toLowerCase());
+    if (demoHit) return demoHit;
     if (useGraphql()) {
       return (await zcGraphqlEngine.getMatchesRaw(id, signal)) as unknown as ZcMatchesResponse;
     }
@@ -1474,6 +1649,8 @@ export const zcApi = {
     tokenMap?: Record<string, ZcTokenMeta>,
     signal?: AbortSignal
   ): Promise<ZcLookupResult | null> {
+    const demoHit = demoLookupProvider?.()?.lookupById.get(id.toLowerCase());
+    if (demoHit) return demoHit;
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const raw = (useGraphql()
       ? await zcGraphqlEngine.lookupRaw(id, signal)
@@ -1585,7 +1762,10 @@ export const zcApi = {
     return out;
   },
 
-  async listAuctions(signal?: AbortSignal): Promise<{
+  async listAuctions(
+    tokenMap: Record<string, ZcTokenMeta> = {},
+    signal?: AbortSignal
+  ): Promise<{
     lots: ZcAuctionLotSummary[];
     vaults: ZcAuctionVaultSummary[];
   }> {
@@ -1598,16 +1778,35 @@ export const zcApi = {
         })) as { lots?: unknown[]; vaults?: unknown[] };
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const mapItems = (rawItems: any[]): ZcCollateralToken[] =>
+      (rawItems || []).map((t) => buildCollateralToken(t.tokenId || t.id, t.amount, t.kind, tokenMap));
+
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const lots = (res?.lots || []).map((l: any): ZcAuctionLotSummary => {
       const m: ZcMarket = l.market === "ERG" ? "ERG" : "SigUSD";
+      const items = mapItems(l.items || []);
+      const boxErg = fromErg(l.nanoErg) ?? 0;
+      const ergInLot = m === "SigUSD" && boxErg > 0.01 ? Math.max(0, boxErg - 0.005) : 0;
       return {
+        id: l.boxId,
         boxId: l.boxId,
+        chainId: l.chainId || l.boxId,
         market: m,
         opening: fromMarket(l.opening, m) ?? 0,
         floor: fromMarket(l.floor, m) ?? 0,
+        start: Number(l.start ?? 0),
+        end: Number(l.end ?? 0),
+        expiry: Number(l.expiry ?? 0),
+        refundFee: fromErg(l.refundFeeNanoErg) ?? 0.005,
+        erg: ergInLot,
+        items,
         priceNow: l.priceNow != null ? fromMarket(l.priceNow, m) : null,
         phase: l.phase || "falling",
-        itemCount: (l.items || []).length,
+        itemCount: items.length + (ergInLot > 0 ? 1 : 0),
+        valid: l.valid !== false,
+        owner: !!l.mine,
+        borrowedByMe: !!l.borrowedByMe,
+        borrowedBondIds: Array.isArray(l.borrowedBondIds) ? l.borrowedBondIds : [],
         pending: !!l.pending
       };
     });
@@ -1617,14 +1816,31 @@ export const zcApi = {
       const m: ZcMarket = v.market === "ERG" ? "ERG" : "SigUSD";
       const excess = v.state === 4;
       const payRaw = excess ? v.quote?.priceRaw : v.quote?.payRaw;
+      const payNow = payRaw != null ? fromMarket(payRaw, m) : null;
+      const target = v.quote?.targetRaw != null ? fromMarket(v.quote.targetRaw, m) : null;
       return {
+        id: v.boxId,
         boxId: v.boxId,
+        shareTokenId: v.shareTokenId,
         bondId: v.bondId,
         market: m,
         vaultType: v.type || "selective",
-        state: v.state ?? 1,
+        state: Number(v.state ?? 1),
         repayment: fromMarket(v.repayment, m) ?? 0,
-        payNow: payRaw != null ? fromMarket(payRaw, m) : null,
+        openBps: Number(v.openingBps ?? 20_000),
+        floorBps: Number(v.floorBps ?? 9_000),
+        length: Number(v.length ?? 720),
+        expiry: Number(v.expiry ?? 2160),
+        start: Number(v.auctionStart ?? 0),
+        currencyHeld: fromMarket(v.currencyHeld, m) ?? 0,
+        items: mapItems(v.items || []),
+        payNow,
+        quote: {
+          pay: payNow,
+          target,
+          bps: v.quote?.bps != null ? Number(v.quote.bps) : null,
+          done: !!v.quote?.done
+        },
         pending: !!v.pending
       };
     });

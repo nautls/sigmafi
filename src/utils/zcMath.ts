@@ -1235,3 +1235,66 @@ export function pnlTone(v: number | null | undefined): "bid" | "danger" | null {
   if (v == null || Math.abs(v) < 1e-9) return null;
   return v > 0 ? "bid" : "danger";
 }
+
+/* ============================================================
+   Auction Schedules & Loan Health
+   ============================================================ */
+
+export function lotPriceAt(
+  lot: { opening: number; floor: number; start: number; end: number; expiry: number },
+  height: number
+): number | null {
+  if (height + 1 >= lot.expiry) return null;
+  if (height <= lot.start) return lot.opening;
+  if (height >= lot.end) return lot.floor;
+  const span = Math.max(1, lot.end - lot.start);
+  return lot.opening - ((lot.opening - lot.floor) * (height - lot.start)) / span;
+}
+
+export function vaultAuctionAt(
+  v: {
+    state: number;
+    repayment: number;
+    openBps: number;
+    floorBps: number;
+    length: number;
+    expiry: number;
+    start: number;
+    currencyHeld: number;
+  },
+  height: number
+): { pay: number | null; bps: number | null; done: boolean } {
+  if (!(v.length > 0)) return { pay: null, bps: null, done: true };
+  if (v.state === 4) {
+    const end = v.start + v.length;
+    if (height + 1 >= end) return { pay: null, bps: 0, done: true };
+    const elapsed = Math.max(0, height - v.start);
+    const bps = Math.max(0, v.openBps * (1 - elapsed / v.length));
+    const pay = (v.repayment * bps) / 10_000;
+    return { pay, bps, done: false };
+  }
+  if (height >= v.start + v.expiry) return { pay: null, bps: v.floorBps, done: true };
+  const since = Math.min(Math.max(0, height - v.start), v.length);
+  const bps = v.openBps - ((v.openBps - v.floorBps) * since) / v.length;
+  const target = (v.repayment * bps) / 10_000;
+  const pay = Math.max(0, target - (v.currencyHeld || 0));
+  return { pay, bps, done: false };
+}
+
+export function loanHealth(
+  bond: {
+    rule: string;
+    ratio: number | null;
+    cov: number | null;
+    collateral: ZcCollateral;
+    repayment: number;
+    market: ZcMarket;
+  },
+  oraclePrice: number
+): number | null {
+  if (bond.rule !== "oracle" || !bond.ratio || !(bond.ratio > 0)) return null;
+  const cov =
+    bond.cov ??
+    (oraclePrice > 0 ? coverage(bond.collateral, bond.repayment, bond.market, oraclePrice) : null);
+  return cov != null ? cov / bond.ratio : null;
+}

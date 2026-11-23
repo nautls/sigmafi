@@ -16,12 +16,12 @@ import { useRoute } from "vue-router";
 import ZcOfferView from "./ZcOfferView.vue";
 import CoverMeter from "./components/CoverMeter.vue";
 import ExecutionPreviewModal, { ExecutionPreviewPayload } from "./components/ExecutionPreviewModal.vue";
+import ZcAssetChip from "./components/ZcAssetChip.vue";
 import ZcCurveEditor, { CurveMarketOverlay } from "./components/ZcCurveEditor.vue";
 import ZcFixedChart from "./components/ZcFixedChart.vue";
 import ZcInteractiveChart, { ChartLayer, ChartReadout } from "./components/ZcInteractiveChart.vue";
 import ZcOrderMark from "./components/ZcOrderMark.vue";
 import ZcTimeEditor from "./components/ZcTimeEditor.vue";
-import AssetIcon from "@/components/AssetIcon.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
 import { zcApi } from "@/services/zcApi";
 import { useZcStore } from "@/stories";
@@ -29,6 +29,7 @@ import {
   ZcAskSummary,
   ZcBondSummary,
   ZcChartMetric,
+  ZcCollateralToken,
   ZcCurves,
   ZcLookupResult,
   ZcMarket,
@@ -61,6 +62,7 @@ import {
   resolvedAskQuote,
   SHARES_UNITS,
   signedFormat,
+  SIGUSD_TOKEN_ID,
   snapMaturity,
   toChartMetric,
   windowAskLine
@@ -172,17 +174,21 @@ async function loadRecord() {
 }
 
 watch(
-  [targetId, () => zc.connected, () => zc.revision],
+  [targetId, () => zc.connected, () => zc.revision, () => zc.demoMode],
   () => {
-    if (zc.connected) void loadRecord();
+    if (zc.connected || zc.demoMode) void loadRecord();
   },
   { immediate: true }
 );
 
 onBeforeUnmount(() => loadAc?.abort());
 
-const height = computed(() => zc.height);
-const oraclePrice = computed(() => zc.oracle.price);
+const height = computed(() =>
+  zc.height > 100_000 ? zc.height : zc.demoMode ? 1_650_000 : zc.height
+);
+const oraclePrice = computed(() =>
+  zc.oracle.price > 0.05 ? zc.oracle.price : zc.demoMode ? 1.42 : zc.oracle.price
+);
 const unit = computed(() => zc.durationUnit);
 
 const isOfferRedirect = computed(() => lookup.value?.type === "offer");
@@ -480,28 +486,56 @@ const myPnl = computed(() => {
 
 // Collateral composition breakdown
 const colBreakdown = computed(() => {
-  const items: { label: string; amount: string; usd: number | null; wrap?: boolean; id?: string }[] = [];
+  const items: {
+    key: string;
+    label: string;
+    amount: string;
+    usd: number | null;
+    token: ZcCollateralToken;
+  }[] = [];
   if (collateral.value.erg > 0) {
     items.push({
+      key: "ERG",
       label: "ERG",
       amount: `${formatNumber(collateral.value.erg, 3, 0)} ERG`,
-      usd: oraclePrice.value > 0 ? collateral.value.erg * oraclePrice.value : null
+      usd: oraclePrice.value > 0 ? collateral.value.erg * oraclePrice.value : null,
+      token: {
+        id: "ERG",
+        ticker: "ERG",
+        name: "Ergo",
+        decimals: 9,
+        amount: collateral.value.erg,
+        rawAmount: String(Math.round(collateral.value.erg * 1e9)),
+        kind: "token",
+        verified: true
+      }
     });
   }
   if (collateral.value.usd > 0) {
     items.push({
+      key: "SigUSD",
       label: "SigUSD",
       amount: `${formatNumber(collateral.value.usd, 2, 0)} SigUSD`,
-      usd: collateral.value.usd
+      usd: collateral.value.usd,
+      token: {
+        id: SIGUSD_TOKEN_ID,
+        ticker: "SigUSD",
+        name: "SigmaUSD",
+        decimals: 2,
+        amount: collateral.value.usd,
+        rawAmount: String(Math.round(collateral.value.usd * 100)),
+        kind: "token",
+        verified: true
+      }
     });
   }
   for (const t of collateral.value.tokens || []) {
     items.push({
+      key: t.id,
       label: t.ticker || t.name || shortenString(t.id, 10),
       amount: `${formatNumber(t.amount, 4, 0)} ${t.ticker || ""}`.trim(),
       usd: null,
-      wrap: t.kind === "receipt",
-      id: t.id
+      token: t
     });
   }
   const totalUsd = items.reduce((s, x) => s + (x.usd || 0), 0);
@@ -1067,45 +1101,16 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
               />
             </div>
 
-            <!-- Collateral Asset Cards -->
+            <!-- Collateral Asset Cards (bond links + wrap receipt hover tooltips) -->
             <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
-              <div
+              <zc-asset-chip
                 v-for="item in colBreakdown.items"
-                :key="item.label + (item.id || '')"
-                class="flex items-center justify-between gap-2 rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-soft)] px-3 py-2"
-              >
-                <div class="flex min-w-0 items-center gap-2">
-                  <market-coin
-                    v-if="item.label === 'ERG' || item.label === 'SigUSD'"
-                    :market="item.label"
-                    :size="18"
-                  />
-                  <asset-icon
-                    v-else-if="item.id"
-                    :token-id="item.id"
-                    custom-class="h-[18px] w-[18px] shrink-0 rounded-full object-cover"
-                  />
-                  <div class="min-w-0">
-                    <div class="flex items-center gap-1.5">
-                      <span class="truncate text-[12.5px] font-semibold text-[color:var(--sf-ink)]">
-                        {{ item.label }}
-                      </span>
-                      <span
-                        v-if="item.wrap"
-                        class="sf-mono rounded bg-[color:var(--sf-bid-soft)] px-1 py-0.5 text-[9px] font-semibold uppercase text-[color:var(--sf-bid)]"
-                      >
-                        Wrapped
-                      </span>
-                    </div>
-                    <div class="sf-mono text-[11px] text-[color:var(--sf-ink-2)]">
-                      {{ item.amount }}
-                    </div>
-                  </div>
-                </div>
-                <span v-if="item.usd != null" class="sf-mono shrink-0 text-[11px] text-[color:var(--sf-muted)]">
-                  ${{ formatNumber(item.usd, 2, 0) }}
-                </span>
-              </div>
+                :key="item.key"
+                :token="item.token"
+                :usd="item.usd"
+                :height="height"
+                variant="card"
+              />
             </div>
           </section>
 
