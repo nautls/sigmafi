@@ -232,6 +232,8 @@ const currentBidRaw = computed(() =>
 const currentBidEff = computed(() => {
   if (currentBidRaw.value == null || !(currentD.value > 0)) return null;
   if (props.feeErg > 0 && hasAbsFace.value) {
+    const fromLine = feeBidLine.value ? lineAt(feeBidLine.value, currentD.value) : null;
+    if (fromLine != null) return fromLine;
     return feeAdjustedBidBps(faceVal.value, currentBidRaw.value, currentD.value, props.feeErg);
   }
   return currentBidRaw.value;
@@ -263,7 +265,11 @@ const xDomain = computed<[number, number]>(() => {
   if (props.overlay?.type === "curve") {
     ds.push(props.overlay.lo, props.overlay.hi);
   } else if (props.overlay?.type === "point-path") {
-    ds.push(props.overlay.dAt(props.height), props.overlay.dAt(props.overlay.expiry));
+    ds.push(
+      props.overlay.dAt(props.height),
+      props.overlay.dAt(props.overlay.expiry),
+      props.overlay.dAt(props.overlay.maxAt)
+    );
   }
   const positive = ds.filter((d) => Number.isFinite(d) && d > 0);
   const loD = positive.length ? Math.min(...positive) : DAY_BLOCKS;
@@ -486,26 +492,84 @@ const chartLayers = computed<ChartLayer[]>(() => {
     const col = "var(--sf-cobalt)";
     const markerColor = isExpiredAtCurrent.value ? "var(--sf-warn)" : col;
     const expH = Math.max(props.height, Math.min(ov.maxAt, ov.expiry));
-    const samplePath = (h0: number, h1: number, n: number) => {
-      if (h1 <= h0) return [];
-      return Array.from({ length: n + 1 }, (_, i) => {
-        const at = h0 + ((h1 - h0) * i) / n;
-        const d = ov.dAt(at);
-        const apr = ov.aprAt(at);
-        const px = ov.priceAt(at);
-        const y =
-          metricView.value === "yield"
-            ? apr != null
-              ? apr / 100
-              : null
-            : px != null && d > 0
-              ? priceToChartMetric(px, ov.face, d, metricView.value)
-              : null;
-        return { x: d / DAY_BLOCKS, y };
-      }).filter((p) => p.x >= 0);
+
+    const evalPathPoint = (at: number) => {
+      const d = ov.dAt(at);
+      const apr = ov.aprAt(at);
+      const px = ov.priceAt(at);
+      const y =
+        metricView.value === "yield"
+          ? apr != null
+            ? apr / 100
+            : null
+          : px != null && d > 0
+            ? priceToChartMetric(px, ov.face, d, metricView.value)
+            : null;
+      return { at, x: d / DAY_BLOCKS, y };
     };
 
-    const liveTrail = samplePath(props.height, expH, 32);
+    const samplePath = (h0: number, h1: number, linearCount: number, geoCount = 0) => {
+      if (h1 <= h0) return [];
+      const heights: number[] = [];
+      for (let i = 0; i <= linearCount; i++) {
+        heights.push(h0 + ((h1 - h0) * i) / linearCount);
+      }
+      // For maturing orders, remaining maturity d shrinks linearly with height while fixed-price
+      // APR scales as 1/d. Add geometrically spaced samples in d so steep curvature near maturity
+      // tracks the scrubbed dot accurately without straight-chord drift.
+      const d0 = ov.dAt(h0);
+      const d1 = ov.dAt(h1);
+      if (geoCount > 0 && d0 > d1 && d1 > 0) {
+        const ratio = d1 / d0;
+        for (let i = 1; i < geoCount; i++) {
+          const targetD = d0 * Math.pow(ratio, i / geoCount);
+          const frac = (d0 - targetD) / (d0 - d1);
+          const at = h0 + (h1 - h0) * frac;
+          if (at > h0 && at < h1) heights.push(at);
+        }
+      }
+      heights.sort((a, b) => a - b);
+
+      const uniqueHeights: number[] = [];
+      for (const at of heights) {
+        if (!uniqueHeights.length || at - uniqueHeights[uniqueHeights.length - 1] > 1e-3) {
+          uniqueHeights.push(at);
+        }
+      }
+
+      // Adaptive midpoint refinement catches sharp kinks (e.g. Moving APR price floors) and
+      // keeps curvature error sub-pixel everywhere along the path.
+      let pts = uniqueHeights.map(evalPathPoint);
+      for (let pass = 0; pass < 3 && pts.length < 180; pass++) {
+        const next: typeof pts = [pts[0]];
+        let added = false;
+        for (let i = 1; i < pts.length; i++) {
+          const a = pts[i - 1];
+          const b = pts[i];
+          if (a.y != null && b.y != null && b.at - a.at > 2) {
+            const mid = evalPathPoint((a.at + b.at) / 2);
+            if (mid.y != null) {
+              const lerpY = (a.y + b.y) / 2;
+              const tol =
+                metricView.value === "abs"
+                  ? Math.max(0.005, ov.face * 0.0004)
+                  : Math.max(0.04, Math.abs(mid.y) * 0.002);
+              if (Math.abs(mid.y - lerpY) > tol && next.length < 180) {
+                next.push(mid);
+                added = true;
+              }
+            }
+          }
+          next.push(b);
+        }
+        pts = next;
+        if (!added) break;
+      }
+
+      return pts.filter((p) => p.x >= 0).map(({ x, y }) => ({ x, y }));
+    };
+
+    const liveTrail = samplePath(props.height, expH, 28, 24);
     const trailMoves =
       liveTrail.length > 1 &&
       liveTrail.some(
@@ -525,7 +589,7 @@ const chartLayers = computed<ChartLayer[]>(() => {
     }
 
     if (ov.maxAt > expH + 6) {
-      const postTrail = samplePath(expH, ov.maxAt, 24);
+      const postTrail = samplePath(expH, ov.maxAt, 24, 72);
       const postMoves =
         postTrail.length > 1 &&
         postTrail.some(
@@ -579,7 +643,7 @@ const chartLayers = computed<ChartLayer[]>(() => {
       });
     }
 
-    // Guide lines + prominent cobalt beacon marker + callout tag for user's own order
+    // Prominent cobalt beacon marker + callout tag for user's own order (pins to top edge if above Y ceiling)
     if (currentD.value > 0 && curY != null) {
       const curXDays = currentD.value / DAY_BLOCKS;
       const valTag =
@@ -588,22 +652,6 @@ const chartLayers = computed<ChartLayer[]>(() => {
           : metricView.value === "pct"
             ? `${formatNumber(curY, 1, 1)}%`
             : formatMarketAmount(curY, props.market);
-      out.push({
-        type: "vline",
-        key: "user-now-vx",
-        x: curXDays,
-        color: markerColor,
-        dash: "2 4",
-        opacity: 0.45
-      });
-      out.push({
-        type: "hline",
-        key: "user-now-hy",
-        y: curY,
-        color: markerColor,
-        dash: "2 4",
-        opacity: 0.35
-      });
       out.push({
         type: "dots",
         key: "user-now-dot",
@@ -615,6 +663,7 @@ const chartLayers = computed<ChartLayer[]>(() => {
             color: markerColor,
             stroke: "var(--sf-card)",
             beacon: true,
+            clampToEdge: true,
             label: `You · ${valTag}`,
             opacity: 1
           }
@@ -627,17 +676,81 @@ const chartLayers = computed<ChartLayer[]>(() => {
 });
 
 const yDomain = computed<[number, number]>(() => {
-  const vals: number[] = [];
+  const isYield = metricView.value === "yield";
+  const baseVals: number[] = [];
+
+  // 1. Always frame market curves, asks, fills, reference lines, and user curve overlays
+  const deferredKeys = new Set([
+    "fee-bid-line",
+    "user-live-trail",
+    "user-post-trail",
+    "user-expiry-dot",
+    "user-now-dot"
+  ]);
   for (const layer of chartLayers.value) {
+    if (isYield && deferredKeys.has(layer.key)) continue;
     if (layer.type === "line" || layer.type === "area") {
-      for (const p of layer.points) if (p.y != null) vals.push(p.y);
+      for (const p of layer.points) if (p.y != null && Number.isFinite(p.y)) baseVals.push(p.y);
     } else if (layer.type === "dots") {
-      for (const p of layer.points) if (p.y != null) vals.push(p.y);
+      for (const p of layer.points) if (p.y != null && Number.isFinite(p.y)) baseVals.push(p.y);
     } else if (layer.type === "hline") {
-      vals.push(layer.y);
+      if (Number.isFinite(layer.y)) baseVals.push(layer.y);
     }
   }
-  return niceDomain(vals.length ? vals : [0, 12], 0.14, metricView.value === "yield");
+
+  if (isYield) {
+    // Always frame the user's starting ("Now") APR so their order is visible on load
+    if (props.overlay?.type === "point-path") {
+      const nowApr = props.overlay.aprAt(props.height);
+      if (nowApr != null && Number.isFinite(nowApr)) baseVals.push(nowApr / 100);
+    }
+
+    const baseMax = baseVals.length ? Math.max(...baseVals) : 15;
+    const vals = [...baseVals];
+
+    // Include active (pre-expiry) trail only if it stays within reasonable headroom of the market
+    // (protects against fixed orders whose expiry is set right up to maturity)
+    const liveCap = Math.max(baseMax * 2.2, 40);
+    const liveLayer = chartLayers.value.find((l) => l.key === "user-live-trail");
+    if (liveLayer && liveLayer.type === "line") {
+      const liveYs = liveLayer.points
+        .map((p) => p.y)
+        .filter((y): y is number => y != null && Number.isFinite(y));
+      if (liveYs.length && Math.max(...liveYs) <= liveCap) {
+        vals.push(...liveYs);
+      }
+    }
+    const expLayer = chartLayers.value.find((l) => l.key === "user-expiry-dot");
+    if (expLayer && expLayer.type === "dots") {
+      for (const p of expLayer.points) {
+        if (p.y != null && Number.isFinite(p.y) && p.y <= liveCap) vals.push(p.y);
+      }
+    }
+
+    // Include fee-adjusted bid points that aren't extreme short-maturity spikes on tiny loans
+    const feeCap = Math.max(baseMax * 1.6, baseMax + 10);
+    const feeLayer = chartLayers.value.find((l) => l.key === "fee-bid-line");
+    if (feeLayer && feeLayer.type === "line") {
+      const feeYs = feeLayer.points
+        .map((p) => p.y)
+        .filter((y): y is number => y != null && Number.isFinite(y));
+      if (feeYs.length && Math.max(...feeYs) <= feeCap) {
+        vals.push(...feeYs);
+      } else {
+        for (const p of feeLayer.points) {
+          if (p.x >= 7 && p.y != null && Number.isFinite(p.y) && p.y <= feeCap) {
+            vals.push(p.y);
+          }
+        }
+      }
+    }
+
+    // Note: `user-post-trail` and scrubbed `user-now-dot` intentionally do NOT expand the APR
+    // y-domain; their steep 1/d tail clips cleanly at the top border while the beacon pins there.
+    return niceDomain(vals.length ? vals : [0, 12], 0.14, true);
+  }
+
+  return niceDomain(baseVals.length ? baseVals : [0, 12], 0.14, false);
 });
 
 const verdict = computed<{ text: string; tone: "bid" | "warn" | "cobalt" | "neutral" } | null>(

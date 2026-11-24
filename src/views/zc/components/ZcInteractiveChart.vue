@@ -17,6 +17,7 @@ export interface ChartDotPoint {
   stroke?: string;
   hollow?: boolean;
   beacon?: boolean;
+  clampToEdge?: boolean;
   label?: string;
   opacity?: number;
   title?: string;
@@ -640,6 +641,45 @@ function rowToneClass(tone?: ChartReadoutRow["tone"]): string {
   if (tone === "danger") return "text-[color:var(--sf-danger)]";
   return "text-[color:var(--sf-ink)]";
 }
+
+function pointEdgeState(pt: ChartDotPoint): "in" | "above" | "below" | "hidden" {
+  if (pt.y == null || !Number.isFinite(pt.y)) return "hidden";
+  if (pt.x < dom.value.x[0] || pt.x > dom.value.x[1]) return "hidden";
+  if (pt.y > dom.value.y[1]) return pt.clampToEdge ? "above" : "hidden";
+  if (pt.y < dom.value.y[0]) return pt.clampToEdge ? "below" : "hidden";
+  return "in";
+}
+
+function beaconLabelLayout(pt: ChartDotPoint, state: "in" | "above" | "below") {
+  const prefix = state === "above" ? "↑ " : state === "below" ? "↓ " : "";
+  const text = `${prefix}${pt.label || ""}`;
+  const w = Math.ceil(text.length * 6.3 + 14);
+  const px = sx(pt.x);
+  const ry =
+    state === "above"
+      ? m.value.t + 2
+      : state === "below"
+        ? m.value.t + H.value - 22
+        : Math.max(m.value.t + 2, Math.min(m.value.t + H.value - 22, sy(pt.y!) - 10));
+  const nearTopToolbar = props.zoom && ry < m.value.t + 34;
+  const rightLimit = nearTopToolbar ? m.value.l + W.value - 96 : m.value.l + W.value - 4;
+  let rx = px + 11;
+  if (rx + w > rightLimit) rx = px - w - 11;
+  rx = Math.max(m.value.l + 4, Math.min(rightLimit - w, rx));
+  return { text, w, rx, ry };
+}
+
+function edgeArrowPath(pt: ChartDotPoint, state: "above" | "below"): string {
+  const px = sx(pt.x);
+  if (state === "above") {
+    const tipY = m.value.t - 1;
+    const baseY = m.value.t + 7.5;
+    return `M${px.toFixed(1)},${tipY.toFixed(1)}L${(px - 5.5).toFixed(1)},${baseY.toFixed(1)}L${(px + 5.5).toFixed(1)},${baseY.toFixed(1)}Z`;
+  }
+  const tipY = m.value.t + H.value + 1;
+  const baseY = m.value.t + H.value - 7.5;
+  return `M${px.toFixed(1)},${tipY.toFixed(1)}L${(px - 5.5).toFixed(1)},${baseY.toFixed(1)}L${(px + 5.5).toFixed(1)},${baseY.toFixed(1)}Z`;
+}
 </script>
 
 <template>
@@ -906,41 +946,60 @@ function rowToneClass(tone?: ChartReadoutRow["tone"]): string {
         </template>
       </g>
 
-      <!-- Unclipped Beacon Labels (so callout pills stay sharp and readable near edges) -->
+      <!-- Unclipped Beacon Labels & Off-Edge Pinned Markers -->
       <template v-for="L in layers" :key="`lbl-${L.key}`">
         <template v-if="L.type === 'dots'">
           <template v-for="(pt, j) in L.points" :key="`lbl-${pt.id || j}`">
-            <g
-              v-if="
-                pt.label &&
-                pt.y != null &&
-                pt.x >= dom.x[0] &&
-                pt.x <= dom.x[1] &&
-                pt.y >= dom.y[0] &&
-                pt.y <= dom.y[1]
-              "
-              pointer-events="none"
-            >
-              <rect
-                :x="sx(pt.x) > m.l + W - 108 ? sx(pt.x) - (pt.label.length * 6.4 + 22) : sx(pt.x) + 11"
-                :y="Math.max(m.t + 2, sy(pt.y) - 10)"
-                :width="pt.label.length * 6.4 + 12"
-                height="20"
-                rx="6"
-                :fill="pt.color || L.color || 'var(--sf-cobalt)'"
-                fill-opacity="0.94"
-              />
-              <text
-                :x="sx(pt.x) > m.l + W - 108 ? sx(pt.x) - (pt.label.length * 6.4 + 16) : sx(pt.x) + 17"
-                :y="Math.max(m.t + 2, sy(pt.y) - 10) + 13.5"
-                fill="#ffffff"
-                font-size="10"
-                font-weight="700"
-                class="sf-mono"
+            <template v-if="pointEdgeState(pt) !== 'hidden'">
+              <g
+                v-if="pointEdgeState(pt) === 'above' || pointEdgeState(pt) === 'below'"
+                pointer-events="none"
               >
-                {{ pt.label }}
-              </text>
-            </g>
+                <circle
+                  v-if="pt.beacon"
+                  :cx="sx(pt.x)"
+                  :cy="pointEdgeState(pt) === 'above' ? m.t + 4 : m.t + H - 4"
+                  r="10"
+                  :fill="pt.color || L.color || 'var(--sf-warn)'"
+                  fill-opacity="0.2"
+                  class="sf-chart-beacon-halo"
+                />
+                <path
+                  :d="edgeArrowPath(pt, pointEdgeState(pt) === 'above' ? 'above' : 'below')"
+                  :fill="pt.color || L.color || 'var(--sf-warn)'"
+                  stroke="var(--sf-card)"
+                  stroke-width="1.6"
+                  stroke-linejoin="round"
+                />
+              </g>
+              <g v-if="pt.label" pointer-events="none">
+                <template
+                  v-for="box in [beaconLabelLayout(pt, pointEdgeState(pt) as 'in' | 'above' | 'below')]"
+                  :key="box.text"
+                >
+                  <rect
+                    :x="box.rx"
+                    :y="box.ry"
+                    :width="box.w"
+                    height="20"
+                    rx="6"
+                    :fill="pt.color || L.color || 'var(--sf-cobalt)'"
+                    fill-opacity="0.94"
+                  />
+                  <text
+                    :x="box.rx + box.w / 2"
+                    :y="box.ry + 13.5"
+                    text-anchor="middle"
+                    fill="#ffffff"
+                    font-size="10"
+                    font-weight="700"
+                    class="sf-mono"
+                  >
+                    {{ box.text }}
+                  </text>
+                </template>
+              </g>
+            </template>
           </template>
         </template>
       </template>
