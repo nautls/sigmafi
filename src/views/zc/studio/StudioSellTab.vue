@@ -422,7 +422,8 @@ function openPreview() {
           ]
         : [])
     ],
-    rawSummary: { action: "createAsk", ...body }
+    rawSummary: { action: "createAsk", ...body },
+    txAction: { type: "createAsk", body }
   });
 }
 </script>

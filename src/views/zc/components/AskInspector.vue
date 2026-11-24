@@ -385,7 +385,44 @@ function openPreview() {
       yieldBps: Math.round(q.yieldBps),
       blocksLeft: q.d,
       maturity: q.maturity
-    }
+    },
+    txAction:
+      props.ask.kind === "order"
+        ? {
+            type: "fillOrder",
+            boxId: props.ask.id,
+            maturity: isWindow.value ? BigInt(q.maturity) : null
+          }
+        : {
+            type: "buyAsk",
+            boxId: props.ask.id,
+            units: isShares.value ? BigInt(selectedShareUnits.value) : null
+          }
+  });
+}
+
+function openCancelPreview() {
+  const a = props.ask;
+  const label =
+    a.kind === "order"
+      ? "Borrow Order"
+      : a.kind === "shares"
+        ? "Share Resale Ask"
+        : "Bond Resale Ask";
+  emit("preview", {
+    title: `Cancel & Refund ${label}`,
+    subtitle: "Returns everything locked in this open listing to your Nautilus wallet",
+    badge: `Cancel · ${a.market}`,
+    tone: "ask",
+    heroLabel: "Box ID",
+    heroValue: shortenString(a.boxId, 14),
+    heroSub: `${a.market} · ${pricingName(a)}`,
+    rows: [
+      { label: "Listing", value: label },
+      { label: "Action", value: "Cancel and refund to wallet" }
+    ],
+    rawSummary: { action: "cancelBox", boxId: a.boxId },
+    txAction: { type: "cancel", boxId: a.boxId }
   });
 }
 </script>
@@ -941,14 +978,23 @@ function openPreview() {
 
     <!-- Pinned Action Footer -->
     <div class="shrink-0 space-y-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-3">
-      <router-link
-        v-if="ask.owner"
-        to="/app/portfolio"
-        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[12.5px] font-semibold"
-      >
-        <span>Manage in Portfolio</span>
-        <arrow-right-icon class="h-3.5 w-3.5" />
-      </router-link>
+      <template v-if="ask.owner">
+        <button
+          type="button"
+          class="sf-btn-ask flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px]"
+          @click="openCancelPreview"
+        >
+          <span>Cancel &amp; Refund</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </button>
+        <router-link
+          :to="{ name: 'zc-portfolio', query: { tab: 'open' } }"
+          class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-[12px] font-semibold"
+        >
+          <span>Open Orders in Portfolio</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </router-link>
+      </template>
       <button
         v-else
         type="button"

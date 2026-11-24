@@ -339,7 +339,8 @@ function openPreview() {
         tone: matchCount.value > 0 ? "bid" : "default"
       }
     ],
-    rawSummary: { action: "createOffer", ...body }
+    rawSummary: { action: "createOffer", ...body },
+    txAction: { type: "createOffer", body }
   });
 }
 </script>

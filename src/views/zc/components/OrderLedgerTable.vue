@@ -57,6 +57,8 @@ const emit = defineEmits<{
   (e: "select-ask", id: string): void;
   (e: "select-bid", id: string): void;
   (e: "quick-fund", ask: ZcAskSummary): void;
+  (e: "quick-cancel-ask", ask: ZcAskSummary): void;
+  (e: "quick-cancel-offer", offer: ZcOfferSummary): void;
   (e: "load-more-asks"): void;
   (e: "load-more-offers"): void;
 }>();
@@ -298,12 +300,20 @@ function isBuyback(a: ZcAskSummary) {
             </td>
 
             <td class="px-3.5 py-2 text-right">
-              <span
-                v-if="ask.owner"
-                class="sf-mono inline-block rounded-[5px] bg-[color:var(--sf-cobalt-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
-              >
-                Yours
-              </span>
+              <div v-if="ask.owner" class="inline-flex items-center justify-end gap-1.5">
+                <span
+                  class="sf-mono inline-block rounded-[5px] bg-[color:var(--sf-cobalt-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
+                >
+                  Yours
+                </span>
+                <button
+                  type="button"
+                  class="sf-mono inline-flex h-6 items-center rounded-[6px] border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] px-2 text-[10.5px] font-semibold text-[color:var(--sf-ask)] transition-all hover:brightness-110 active:scale-95"
+                  @click.stop="emit('quick-cancel-ask', ask)"
+                >
+                  Cancel
+                </button>
+              </div>
               <button
                 v-else-if="isUsable(ask)"
                 type="button"
@@ -418,17 +428,30 @@ function isBuyback(a: ZcAskSummary) {
             </td>
 
             <td class="px-3.5 py-2 text-right">
+              <div v-if="offer.owner" class="inline-flex items-center justify-end gap-1.5">
+                <span
+                  class="sf-mono inline-block rounded-[5px] bg-[color:var(--sf-cobalt-soft)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-cobalt)]"
+                >
+                  Yours
+                </span>
+                <button
+                  type="button"
+                  class="sf-mono inline-flex h-6 items-center rounded-[6px] border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] px-2 text-[10.5px] font-semibold text-[color:var(--sf-ask)] transition-all hover:brightness-110 active:scale-95"
+                  @click.stop="emit('quick-cancel-offer', offer)"
+                >
+                  Cancel
+                </button>
+              </div>
               <span
+                v-else
                 class="sf-mono inline-block rounded-[5px] px-2 py-0.5 text-[10px] font-semibold"
                 :class="
-                  offer.owner
-                    ? 'bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)]'
-                    : isUsable(offer)
-                      ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
-                      : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
+                  isUsable(offer)
+                    ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
+                    : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
                 "
               >
-                {{ offer.owner ? "Yours" : isUsable(offer) ? "Bidding" : offer.reason || "Paused" }}
+                {{ isUsable(offer) ? "Bidding" : offer.reason || "Paused" }}
               </span>
             </td>
           </tr>

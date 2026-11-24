@@ -8,6 +8,7 @@ import {
   XIcon
 } from "@zhuowenli/vue-feather-icons";
 import { computed, onBeforeUnmount, ref, watch } from "vue";
+import { ExecutionPreviewPayload } from "./ExecutionPreviewModal.vue";
 import { zcApi } from "@/services/zcApi";
 import { ZcDurationUnit, ZcMatchBuy, ZcOfferSummary } from "@/types/zc";
 import { shortenString } from "@/utils";
@@ -17,6 +18,7 @@ import {
   formatApr,
   formatCompact,
   formatDur,
+  formatMarketAmount,
   formatNumber,
   isHex64,
   isOracleRefreshingOnly,
@@ -38,6 +40,7 @@ const emit = defineEmits<{
   (e: "close"): void;
   (e: "borrow-against", params: { aprPct: number; days: number }): void;
   (e: "sell-against", params: { aprPct: number; days: number }): void;
+  (e: "preview", payload: ExecutionPreviewPayload): void;
 }>();
 
 const copied = ref(false);
@@ -191,6 +194,26 @@ function handleBorrowAgainst() {
 
 function handleSellAgainst() {
   emit("sell-against", targetParams());
+}
+
+function openCancelPreview() {
+  const o = props.offer;
+  emit("preview", {
+    title: "Cancel & Refund Lend Offer",
+    subtitle: `Returns remaining unspent ${o.market} capital & ERG reserve to Nautilus`,
+    badge: `Cancel Offer · ${o.market}`,
+    tone: "ask",
+    heroLabel: "Capital returned",
+    heroValue: formatMarketAmount(o.capital, o.market),
+    heroSub: `Offer ${shortenString(o.id, 14)}`,
+    rows: [
+      { label: "Market", value: o.market },
+      { label: "Reserve ERG", value: `${formatNumber(o.reserve, 3, 0)} ERG` },
+      { label: "Delivery mode", value: o.delivery }
+    ],
+    rawSummary: { action: "cancelOffer", offerId: o.id, boxId: o.boxId },
+    txAction: { type: "cancel", boxId: o.boxId }
+  });
 }
 </script>
 
@@ -456,14 +479,23 @@ function handleSellAgainst() {
 
     <!-- Pinned Action Footer -->
     <div class="shrink-0 space-y-2 border-t border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-4 py-3">
-      <router-link
-        v-if="offer.owner"
-        to="/app/portfolio"
-        class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[12.5px] font-semibold"
-      >
-        <span>Manage in Portfolio</span>
-        <arrow-right-icon class="h-3.5 w-3.5" />
-      </router-link>
+      <template v-if="offer.owner">
+        <button
+          type="button"
+          class="sf-btn-ask flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2.5 text-[13px]"
+          @click="openCancelPreview"
+        >
+          <span>Cancel &amp; Refund</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </button>
+        <router-link
+          :to="{ name: 'zc-portfolio', query: { tab: 'open' } }"
+          class="sf-btn-outline flex w-full items-center justify-center gap-1.5 rounded-xl px-4 py-2 text-[12px] font-semibold"
+        >
+          <span>Open Orders in Portfolio</span>
+          <arrow-right-icon class="h-3.5 w-3.5" />
+        </router-link>
+      </template>
       <template v-else>
         <button
           type="button"

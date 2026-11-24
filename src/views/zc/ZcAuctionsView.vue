@@ -239,7 +239,8 @@ function openBuyLot(l: ZcAuctionLotSummary) {
         value: formatMarketAmount(walletBal(l.market), l.market)
       }
     ],
-    rawSummary: { action: "buyLot", lotId: l.id, boxId: l.boxId, market: l.market, priceNow: price }
+    rawSummary: { action: "buyLot", lotId: l.id, boxId: l.boxId, market: l.market, priceNow: price },
+    txAction: { type: "buyLot", boxId: l.boxId }
   };
 }
 
@@ -256,7 +257,8 @@ function openCancelLot(l: ZcAuctionLotSummary) {
       { label: "Opening / Floor", value: `${formatMarketAmount(l.opening, l.market)} → ${formatMarketAmount(l.floor, l.market)}` },
       { label: "Refund fee", value: `${formatNumber(l.refundFee, 4, 0)} ERG` }
     ],
-    rawSummary: { action: "cancelLot", lotId: l.id, boxId: l.boxId }
+    rawSummary: { action: "cancelLot", lotId: l.id, boxId: l.boxId },
+    txAction: { type: "cancel", boxId: l.boxId }
   };
 }
 
@@ -289,7 +291,8 @@ function openBuyVault(v: ZcAuctionVaultSummary) {
       bondId: v.bondId,
       market: v.market,
       payNow: ev.pay
-    }
+    },
+    txAction: { type: "buyVault", boxId: v.boxId }
   };
 }
 </script>

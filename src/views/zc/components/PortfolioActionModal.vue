@@ -12,7 +12,9 @@ import {
   formatDur,
   formatMarketAmount,
   formatNumber,
-  liquidationPrice
+  liquidationPrice,
+  SIGUSD_TOKEN_ID,
+  toRaw
 } from "@/utils/zcMath";
 
 const props = defineProps<{
@@ -131,10 +133,22 @@ function submit() {
         action: "repayBond",
         bondId: bond.value.id,
         ...(useCollateral.value ? { fromCollateral: "max" } : {})
+      },
+      txAction: {
+        type: "repay",
+        assetId: bond.value.id,
+        fromCollateral: useCollateral.value ? "max" : null
       }
     });
     return;
   }
+
+  const rawAdd = toRaw(
+    addAmountText.value.trim() || addAmountNum.value,
+    addAsset.value === "ERG" ? 9 : 2,
+    "floor"
+  );
+  const rawAddBig = rawAdd ? BigInt(rawAdd) : 0n;
 
   emit("preview", {
     title: "Add Bond Collateral",
@@ -164,7 +178,17 @@ function submit() {
       bondId: bond.value.id,
       asset: addAsset.value,
       amount: addAmountNum.value
-    }
+    },
+    txAction:
+      rawAddBig > 0n
+        ? addAsset.value === "ERG"
+          ? { type: "recollateralize", assetId: bond.value.id, nanoErg: rawAddBig }
+          : {
+              type: "recollateralize",
+              assetId: bond.value.id,
+              tokens: [{ tokenId: SIGUSD_TOKEN_ID, amount: rawAddBig }]
+            }
+        : null
   });
 }
 

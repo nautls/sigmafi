@@ -72,7 +72,8 @@ function previewWrap(tok: ZcWalletToken) {
       { label: "Custody reserve", value: "0.03 ERG (returned on unwrap)" },
       { label: "Unwrap", value: "Any time by receipt holder", tone: "bid" }
     ],
-    rawSummary: { action: "wrapNft", tokenId: tok.id }
+    rawSummary: { action: "wrapNft", tokenId: tok.id },
+    txAction: { type: "createWrap", body: { tokenId: tok.id } }
   });
 }
 
@@ -84,6 +85,7 @@ function previewWrapAction(w: ZcPortfolioWrap, action: "mint" | "cancel" | "unwr
   };
   const statusLabel =
     w.state === "requested" ? "Minting" : w.inWallet ? "In wallet" : "Pledged";
+  const receiptId = w.receiptId || w.receipt.id;
   emit("preview", {
     title: titleMap[action],
     subtitle: `${w.token.ticker} · ${shortenString(w.token.id, 14)}`,
@@ -101,9 +103,19 @@ function previewWrapAction(w: ZcPortfolioWrap, action: "mint" | "cancel" | "unwr
     rawSummary: {
       action: action === "mint" ? "mintWrap" : action === "cancel" ? "cancelWrap" : "unwrapNft",
       boxId: w.boxId,
-      receiptTokenId: w.receiptId || w.receipt.id,
+      receiptTokenId: receiptId,
       innerTokenId: w.token.id
-    }
+    },
+    txAction:
+      action === "mint"
+        ? w.boxId
+          ? { type: "mint", boxId: w.boxId }
+          : null
+        : action === "cancel"
+          ? w.boxId
+            ? { type: "cancel", boxId: w.boxId }
+            : null
+          : { type: "unwrap", receiptId }
   });
 }
 </script>

@@ -16,6 +16,7 @@ import { useRoute } from "vue-router";
 import ZcOfferView from "./ZcOfferView.vue";
 import CoverMeter from "./components/CoverMeter.vue";
 import ExecutionPreviewModal, { ExecutionPreviewPayload } from "./components/ExecutionPreviewModal.vue";
+import PortfolioActionModal from "./components/PortfolioActionModal.vue";
 import ZcAssetChip from "./components/ZcAssetChip.vue";
 import ZcCurveEditor, { CurveMarketOverlay } from "./components/ZcCurveEditor.vue";
 import ZcFixedChart from "./components/ZcFixedChart.vue";
@@ -92,6 +93,20 @@ const sharesPct = ref<number>(100);
 const copied = ref(false);
 const checksOpen = ref(false);
 const previewPayload = ref<ExecutionPreviewPayload | null>(null);
+const actionModal = ref<{ mode: "repay" | "addCollateral" } | null>(null);
+
+const canLiquidateBond = computed(() => {
+  const b = bond.value;
+  if (!b || ask.value) return false;
+  if (b.state && b.state !== "live" && b.state !== "active" && b.state !== "overdue") return false;
+  if (lifecycle.value?.matured) return true;
+  return (
+    rule.value === "oracle" &&
+    covNow.value != null &&
+    ratio.value != null &&
+    covNow.value < ratio.value
+  );
+});
 
 let loadAc: AbortController | null = null;
 
@@ -588,7 +603,9 @@ function onDockPointerMove(e: MouseEvent) {
   el.style.setProperty("--spot-y", `${e.clientY - r.top}px`);
 }
 
-function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" | "extinguish" | "unfrac") {
+function openActionPreview(
+  kind: "fill" | "cancel" | "repay" | "addCollateral" | "extinguish" | "unfrac" | "liquidate"
+) {
   const q = activeQuote.value;
   const m = market.value;
 
@@ -617,7 +634,19 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
         market: m,
         maturity: q.maturity,
         units: selectedShareUnits.value
-      }
+      },
+      txAction:
+        ask.value.kind === "order"
+          ? {
+              type: "fillOrder",
+              boxId: ask.value.boxId,
+              maturity: isWindow.value ? BigInt(q.maturity) : null
+            }
+          : {
+              type: "buyAsk",
+              boxId: ask.value.boxId,
+              units: isSharesAsk.value ? BigInt(selectedShareUnits.value) : null
+            }
     };
     return;
   }
@@ -632,12 +661,17 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
       heroValue: ask.value.kind === "order" ? "Collateral basket" : formatMarketAmount(repayment.value, m),
       heroSub: shortenString(ask.value.id, 14),
       rows: [{ label: "Box ID", value: shortenString(ask.value.boxId, 16) }],
-      rawSummary: { action: ask.value.kind === "order" ? "cancelOrder" : "cancelAsk", boxId: ask.value.boxId }
+      rawSummary: { action: ask.value.kind === "order" ? "cancelOrder" : "cancelAsk", boxId: ask.value.boxId },
+      txAction: { type: "cancel", boxId: ask.value.boxId }
     };
     return;
   }
 
   if (kind === "repay" && bond.value) {
+    if (myBorrowPosition.value) {
+      actionModal.value = { mode: "repay" };
+      return;
+    }
     previewPayload.value = {
       title: "Repay Zero-Coupon Bond",
       subtitle: "Repays face value and unlocks your collateral basket",
@@ -650,12 +684,17 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
         { label: "Collateral unlocked", value: colBreakdown.value.items.map((i) => i.amount).join(" + ") || "—" },
         { label: "Maturity", value: dateAtHeight(bond.value.maturity, height.value) }
       ],
-      rawSummary: { action: "repayBond", bondId: bond.value.id }
+      rawSummary: { action: "repayBond", bondId: bond.value.id },
+      txAction: { type: "repay", assetId: bond.value.id }
     };
     return;
   }
 
   if (kind === "addCollateral" && bond.value) {
+    if (myBorrowPosition.value) {
+      actionModal.value = { mode: "addCollateral" };
+      return;
+    }
     previewPayload.value = {
       title: "Add Bond Collateral",
       subtitle: "Top up collateral to raise cover ratio and lower liquidation risk",
@@ -680,12 +719,14 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
       heroValue: formatMarketAmount(bond.value.repayment, m),
       heroSub: "No cash repayment required",
       rows: [{ label: "Bond", value: shortenString(bond.value.id, 14) }],
-      rawSummary: { action: "extinguishBond", bondId: bond.value.id }
+      rawSummary: { action: "extinguishBond", bondId: bond.value.id },
+      txAction: { type: "extinguish", assetId: bond.value.id }
     };
     return;
   }
 
   if (kind === "unfrac" && bond.value) {
+    const shareTok = myLendPosition.value?.tokenId || targetId.value;
     previewPayload.value = {
       title: "Un-fractionalize Bond Shares",
       subtitle: "Recombines 100% of shares back into a whole bond unit",
@@ -694,7 +735,35 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
       heroLabel: "Whole bond unit",
       heroValue: formatMarketAmount(bond.value.repayment, m),
       rows: [{ label: "Bond", value: shortenString(bond.value.id, 14) }],
-      rawSummary: { action: "unfractionalize", bondId: bond.value.id }
+      rawSummary: { action: "unfractionalize", bondId: bond.value.id, tokenId: shareTok },
+      txAction: {
+        type: "claim",
+        tokenId: shareTok,
+        units: myLendPosition.value?.unitsRaw ? BigInt(myLendPosition.value.unitsRaw) : null
+      }
+    };
+    return;
+  }
+
+  if (kind === "liquidate" && bond.value) {
+    previewPayload.value = {
+      title: "Liquidate Defaulted Bond",
+      subtitle: "Triggers collateral recovery and earns the liquidation fee reserve",
+      badge: `Liquidate · ${m}`,
+      tone: "ask",
+      heroLabel: "Unpaid repayment",
+      heroValue: formatMarketAmount(bond.value.repayment, m),
+      heroSub: `Bond ${shortenString(bond.value.id, 14)}`,
+      rows: [
+        {
+          label: "Condition",
+          value: lifecycle.value?.matured
+            ? "Matured unpaid"
+            : `Oracle cover < ${ratio.value ?? "—"}%`
+        }
+      ],
+      rawSummary: { action: "liquidateBond", bondId: bond.value.id },
+      txAction: { type: "liquidate", assetId: bond.value.id }
     };
   }
 }
@@ -1413,8 +1482,18 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
                 </button>
               </template>
 
+              <button
+                v-if="canLiquidateBond"
+                type="button"
+                class="sf-btn-ask flex h-10 w-full items-center justify-center gap-2 rounded-xl text-[13.5px]"
+                @click="openActionPreview('liquidate')"
+              >
+                <span>Liquidate Bond</span>
+                <arrow-right-icon class="h-4 w-4" />
+              </button>
+
               <router-link
-                v-if="!myBorrowPosition && !myLendPosition"
+                v-if="!myBorrowPosition && !myLendPosition && !canLiquidateBond"
                 to="/app"
                 class="sf-btn-outline flex h-9 w-full items-center justify-center gap-2 rounded-xl text-[12.5px]"
               >
@@ -1427,10 +1506,29 @@ function openActionPreview(kind: "fill" | "cancel" | "repay" | "addCollateral" |
     </template>
 
     <transition name="sf-modal">
+      <portfolio-action-modal
+        v-if="actionModal && myBorrowPosition"
+        :mode="actionModal.mode"
+        :position="myBorrowPosition"
+        :height="height"
+        :oracle-price="oraclePrice"
+        :wallet-erg="zc.portfolio.walletErg"
+        :wallet-sig-usd="zc.portfolio.walletSigUsd"
+        :unit="unit"
+        @close="actionModal = null"
+        @preview="
+          actionModal = null;
+          previewPayload = $event;
+        "
+      />
+    </transition>
+
+    <transition name="sf-modal">
       <execution-preview-modal
         v-if="previewPayload"
         :payload="previewPayload"
         @close="previewPayload = null"
+        @submitted="void loadRecord()"
       />
     </transition>
   </div>

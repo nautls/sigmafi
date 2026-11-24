@@ -417,6 +417,37 @@ export function excessPrice(v: ZcShareVault, at: bigint): bigint | null {
   return p;
 }
 
+/** The lot tokens an excess sale leaves for pro rata claims: those at or above the in-kind threshold. */
+export function keptBySale(v: ZcShareVault): ChainAsset[] {
+  if (!excessAuction(v)) return [];
+  const cur = vaultCurrency(v);
+  const threshold = vaultThreshold(v);
+  return v.box.assets
+    .slice(1)
+    .filter((t) => t.tokenId !== cur && t.amount >= threshold);
+}
+
+/** Whether a sale leaves a token currency's nanoERG in the vault: an excess sale does, unless it is thin. */
+export function saleKeepsErg(v: ZcShareVault): boolean {
+  return (
+    excessAuction(v) &&
+    vaultCurrency(v) !== null &&
+    v.box.value - MIN_BOX >= vaultThreshold(v)
+  );
+}
+
+/** The most of the repayment the bond's own collateral can pay: nanoERG above MIN_BOX, or repayment token held. */
+export function repayableFromCollateral(bond: ZcBond): bigint {
+  const mToken = marketTokenId(bond.market);
+  if (mToken === null) {
+    return bigMax(0n, bigMin(bond.repayment, bond.collateralErg - MIN_BOX));
+  }
+  const held = bond.collateral
+    .filter((t) => t.tokenId === mToken)
+    .reduce((acc, t) => acc + t.amount, 0n);
+  return bigMin(bond.repayment, held);
+}
+
 // ─── Asks ─────────────────────────────────────────────────────────────────────
 
 export function isGuardedAsk(a: ZcAsk): boolean {

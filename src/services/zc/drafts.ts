@@ -38,6 +38,7 @@ import {
   MIN_BATCHING_FEE,
   orderedPoints,
   rankYield,
+  REFRESH_BOUNTY,
   SHARE_COUNT,
   snapMaturityBig,
   yieldBps,
@@ -116,7 +117,7 @@ function readPoints(raw: unknown): [bigint, bigint][] {
   });
 }
 
-function readTokens(raw: unknown): ChainAsset[] {
+export function readTokens(raw: unknown): ChainAsset[] {
   if (!Array.isArray(raw)) return [];
   return raw.map((item) => {
     const t = asObj(item);
@@ -264,7 +265,7 @@ function simulateWalletLend(
   };
 }
 
-function buildDraftOffer(d: Obj, h: bigint): ZcOffer {
+export function buildDraftOffer(d: Obj, h: bigint): ZcOffer {
   const m = marketOf(d);
   const capital = needLong(d, "capital");
   const minYield = needLong(d, "minYieldBps");
@@ -443,7 +444,7 @@ function simulateOffer(d: Obj, matcher: ZcMatcher): Record<string, unknown> {
   };
 }
 
-function buildDraftOrder(d: Obj, h: bigint): ZcOrder {
+export function buildDraftOrder(d: Obj, h: bigint): ZcOrder {
   const m = marketOf(d);
   const pricing = typeof d.pricing === "string" ? d.pricing : "fixed";
   const principal = needLong(d, "principal");
@@ -675,7 +676,7 @@ function simulateOrder(d: Obj, matcher: ZcMatcher): Record<string, unknown> {
   };
 }
 
-function buildDraftAsk(d: Obj, matcher: ZcMatcher): ZcAsk {
+export function buildDraftAsk(d: Obj, matcher: ZcMatcher): ZcAsk {
   const h = matcher.height;
   const token =
     typeof d.tokenId === "string" && d.tokenId.trim().length === 64
@@ -799,6 +800,141 @@ function simulateAsk(d: Obj, matcher: ZcMatcher): Record<string, unknown> {
     remaining: taker ? "0" : a.token.amount.toString(),
     rounds: run.rounds
   };
+}
+
+export interface ZcLotDraft {
+  readonly market: ZcMarket;
+  readonly items: readonly ChainAsset[];
+  readonly erg: bigint;
+  /** R5: [opening, floor, start, end, expiry, refundFee] */
+  readonly terms: readonly bigint[];
+}
+
+export interface ZcShareAuctionDraft {
+  readonly openingBps: bigint;
+  readonly floorBps: bigint;
+  readonly length: bigint;
+  readonly expiry: bigint;
+  readonly threshold: bigint;
+}
+
+export interface ZcShareRequestDraft {
+  /** R8: [shareCount, pullFee, mintFee, ...auctionTerms] */
+  readonly terms: readonly bigint[];
+  readonly auction: ZcShareAuctionDraft | null;
+}
+
+export interface ZcWrapDraft {
+  readonly tokenId: string;
+  readonly amount: bigint | null;
+  readonly mintFee: bigint;
+  readonly refreshReserve: bigint;
+}
+
+export const DEFAULT_REFUND_FEE = 2_000_000n;
+export const DEFAULT_SHARE_FEE = 5_000_000n;
+export const DEFAULT_WRAP_FEE = 5_000_000n;
+export const DEFAULT_REFRESH_RESERVE = 3n * REFRESH_BOUNTY;
+export const DEFAULT_AUCTION_LENGTH = 720n;
+export const DEFAULT_AUCTION_EXPIRY = 2160n;
+export const SELECTIVE_THRESHOLD = 100n;
+
+/** Exact port of ZcDrafts.lotOf. */
+export function buildDraftLot(d: Obj, h: bigint): ZcLotDraft {
+  const m = marketOf(d);
+  const items = readTokens(d.items);
+  const erg = optLong(d, "nanoErg") ?? 0n;
+  const opening = needLong(d, "opening");
+  const floor = needLong(d, "floor");
+  const start = optLong(d, "start") ?? h;
+  const end = needLong(d, "end");
+  const expiry = optLong(d, "expiry") ?? end;
+  const refund = optLong(d, "refundFeeNanoErg") ?? DEFAULT_REFUND_FEE;
+  const mToken = marketTokenId(m);
+
+  check(
+    items.length > 0 || (mToken !== null && erg > 0n),
+    `name at least one item${mToken !== null ? ", or some nanoErg" : ""}`
+  );
+  const uniqueIds = new Set(items.map((t) => t.tokenId));
+  check(
+    uniqueIds.size === items.length && items.every((t) => t.amount >= 1n),
+    "list each item once, with a positive amount"
+  );
+  check(
+    mToken !== null || erg === 0n,
+    "an ERG lot sells tokens only: its box's nanoERG return to the seller with the payment"
+  );
+  check(erg >= 0n && refund >= 0n, "nanoErg and refundFeeNanoErg cannot be negative");
+  check(floor >= 1n && floor <= opening, "the lot needs 1 <= floor <= opening");
+  check(end > start, "the price must fall over at least one block: end must be above start");
+  check(expiry >= end, "the expiry cannot come before the end of the fall");
+  check(expiry > h + 1n, "the expiry must be above the current height");
+  return { market: m, items, erg, terms: [opening, floor, start, end, expiry, refund] };
+}
+
+/** Exact port of ZcDrafts.shareRequestOf. */
+export function buildDraftShareRequest(d: Obj): ZcShareRequestDraft {
+  const n = optLong(d, "shareCount") ?? SHARE_COUNT;
+  const pull = optLong(d, "pullFeeNanoErg") ?? DEFAULT_SHARE_FEE;
+  const mint = optLong(d, "mintFeeNanoErg") ?? DEFAULT_SHARE_FEE;
+  check(n >= 1n && n <= 1_000_000_000n, "shareCount must be 1 to 1000000000");
+  check(
+    pull >= MIN_BATCHING_FEE && mint >= MIN_BATCHING_FEE,
+    "the pull and mint fees must each be at least 0.002 ERG"
+  );
+
+  const vaultKind = typeof d.vault === "string" ? d.vault : "selective";
+  let auction: ZcShareAuctionDraft | null = null;
+  if (vaultKind === "plain") {
+    auction = null;
+  } else if (vaultKind === "selective" || vaultKind === "dutch") {
+    const length = optLong(d, "length") ?? DEFAULT_AUCTION_LENGTH;
+    const openingBps = needLong(d, "openingBps");
+    const floorBpsVal = needLong(d, "floorBps");
+    const expiry = optLong(d, "expiry") ?? bigMax(DEFAULT_AUCTION_EXPIRY, length);
+    const threshold = vaultKind === "dutch" ? LONG_MAX : SELECTIVE_THRESHOLD;
+    check(
+      floorBpsVal >= 0n && floorBpsVal <= openingBps && openingBps <= 1_000_000n,
+      "the auction needs 0 <= floorBps <= openingBps <= 1000000"
+    );
+    check(length >= 1n && length <= 1_000_000n, "the auction length must be 1 to 1000000 blocks");
+    check(
+      expiry >= length && expiry <= 1_000_000n,
+      "the auction expiry must be from its length to 1000000 blocks"
+    );
+    auction = { openingBps, floorBps: floorBpsVal, length, expiry, threshold };
+  } else {
+    badRequest(`vault must be selective, dutch or plain, not ${vaultKind}`);
+  }
+
+  const terms = auction
+    ? [
+        n,
+        pull,
+        mint,
+        auction.openingBps,
+        auction.floorBps,
+        auction.length,
+        auction.expiry,
+        auction.threshold
+      ]
+    : [n, pull, mint];
+  return { terms, auction };
+}
+
+/** Exact port of ZcDrafts.wrapOf. */
+export function buildDraftWrap(d: Obj): ZcWrapDraft {
+  const rawToken = typeof d.tokenId === "string" ? d.tokenId.trim().toLowerCase() : "";
+  if (!/^[0-9a-f]{64}$/.test(rawToken)) {
+    badRequest("tokenId must be a 64-character id");
+  }
+  const amount = optLong(d, "amount");
+  const mintFee = optLong(d, "mintFeeNanoErg") ?? DEFAULT_WRAP_FEE;
+  const refreshReserve = optLong(d, "refreshReserveNanoErg") ?? DEFAULT_REFRESH_RESERVE;
+  check(mintFee >= MIN_BATCHING_FEE, "the mint fee must be at least 0.002 ERG");
+  check(refreshReserve >= 0n, "the refresh reserve cannot be negative");
+  return { tokenId: rawToken, amount, mintFee, refreshReserve };
 }
 
 export function simulateDraft(

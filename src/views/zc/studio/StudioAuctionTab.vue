@@ -165,7 +165,8 @@ function openPreview() {
         ? [{ label: "Oracle ref", value: formatMarketAmount(oracleRef.value, market.value), tone: "cobalt" as const }]
         : [])
     ],
-    rawSummary: { action: "createLot", ...body }
+    rawSummary: { action: "createLot", ...body },
+    txAction: { type: "createLot", body }
   });
 }
 </script>

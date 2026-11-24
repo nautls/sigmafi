@@ -7,7 +7,8 @@ import {
   RefreshCwIcon,
   ZapIcon
 } from "@zhuowenli/vue-feather-icons";
-import { computed, ref } from "vue";
+import { computed, ref, watch } from "vue";
+import { useRoute } from "vue-router";
 import CoverMeter from "./components/CoverMeter.vue";
 import ExecutionPreviewModal, { ExecutionPreviewPayload } from "./components/ExecutionPreviewModal.vue";
 import PortfolioActionModal from "./components/PortfolioActionModal.vue";
@@ -50,10 +51,40 @@ import {
 
 const zc = useZcStore();
 const wallet = useWalletStore();
+const route = useRoute();
 
 type PortfolioTab = "lend" | "borrow" | "open" | "wraps";
 
-const activeTab = ref<PortfolioTab>("lend");
+function parseTabQuery(raw: unknown): PortfolioTab | null {
+  if (raw === "lend" || raw === "borrow" || raw === "open" || raw === "wraps") return raw;
+  return null;
+}
+
+const initialTab = parseTabQuery(route.query.tab);
+const activeTab = ref<PortfolioTab>(initialTab ?? "lend");
+const userPickedTab = ref(initialTab !== null);
+
+function selectTab(tab: PortfolioTab) {
+  userPickedTab.value = true;
+  activeTab.value = tab;
+}
+
+function syncPortfolio() {
+  void wallet.getBoxes(true);
+  void zc.refresh();
+  void zc.refreshPortfolio();
+}
+
+watch(
+  () => route.query.tab,
+  (q) => {
+    const parsed = parseTabQuery(q);
+    if (parsed) {
+      userPickedTab.value = true;
+      activeTab.value = parsed;
+    }
+  }
+);
 const lendFilter = ref<"all" | "live" | "actionable">("all");
 const ladderMarket = ref<ZcMarket>(zc.activeMarket);
 const actionModal = ref<{ mode: "repay" | "addCollateral"; position: ZcPortfolioPosition } | null>(
@@ -103,6 +134,21 @@ const openItems = computed<OpenBoxItem[]>(() => [
   ...zc.portfolio.openLots.map((l): OpenBoxItem => ({ type: "lot", key: `lot-${l.id}`, lot: l })),
   ...zc.portfolio.mintRequests.map((r): OpenBoxItem => ({ type: "mint", key: `mnt-${r.id}`, req: r }))
 ]);
+
+// If user landed on Portfolio with no explicit ?tab= and has no Lending bonds yet,
+// automatically focus Open Orders (or Borrowing) so cancellable orders aren't hidden.
+watch(
+  [() => zc.portfolio.loaded, () => lendPositions.value.length, () => borrowPositions.value.length, () => openItems.value.length],
+  ([loaded, lendCount, borrowCount, openCount]) => {
+    if (!loaded || userPickedTab.value || lendCount > 0) return;
+    if (openCount > 0) {
+      activeTab.value = "open";
+    } else if (borrowCount > 0) {
+      activeTab.value = "borrow";
+    }
+  },
+  { immediate: true }
+);
 
 const rawWrappableNfts = computed(() =>
   zc.portfolio.walletTokens.filter(
@@ -266,12 +312,14 @@ function previewExtinguish(p: ZcPortfolioPosition) {
       { label: "Bond", value: shortenString(b.id, 14) },
       { label: "Fee reserve returned", value: `${formatNumber(b.reserve ?? 0.05, 3, 0)} ERG` }
     ],
-    rawSummary: { action: "extinguishBond", bondId: b.id }
+    rawSummary: { action: "extinguishBond", bondId: b.id },
+    txAction: { type: "extinguish", assetId: b.id }
   };
 }
 
 function previewClaim(p: ZcPortfolioPosition, unfrac = false) {
   const b = p.bond;
+  const tokId = p.tokenId || p.id;
   previewPayload.value = {
     title: unfrac ? "Un-fractionalize Bond Shares" : "Claim Bond Settlement",
     subtitle: unfrac
@@ -290,16 +338,21 @@ function previewClaim(p: ZcPortfolioPosition, unfrac = false) {
         ),
     heroSub: `Bond ${shortenString(b.id, 14)}`,
     rows: [
-      { label: "Token", value: shortenString(p.tokenId || p.id, 14) },
+      { label: "Token", value: shortenString(tokId, 14) },
       ...(p.kind === "shares"
         ? [{ label: "Shares", value: `${formatNumber((p.units / SHARES_UNITS) * 100, 2, 0)}%` }]
         : [])
     ],
     rawSummary: {
       action: unfrac ? "unfractionalize" : "claimSettlement",
-      tokenId: p.tokenId || p.id,
+      tokenId: tokId,
       bondId: b.id,
       units: p.unitsRaw
+    },
+    txAction: {
+      type: "claim",
+      tokenId: tokId,
+      units: p.kind === "shares" && p.unitsRaw ? BigInt(p.unitsRaw) : null
     }
   };
 }
@@ -314,7 +367,8 @@ function previewPull(p: ZcPortfolioPosition) {
     heroValue: shortenString(p.vaultId || p.bond.id, 14),
     heroSub: `Bond ${shortenString(p.bond.id, 14)}`,
     rows: [{ label: "Market", value: p.bond.market }],
-    rawSummary: { action: "pullVault", vaultId: p.vaultId, bondId: p.bond.id }
+    rawSummary: { action: "pullVault", vaultId: p.vaultId, bondId: p.bond.id },
+    txAction: p.vaultId ? { type: "pull", boxId: p.vaultId } : null
   };
 }
 
@@ -330,7 +384,8 @@ function previewLiquidate(p: ZcPortfolioPosition) {
     rows: [
       { label: "Rule", value: p.bond.rule === "oracle" ? `Oracle < ${p.bond.ratio}%` : "Matured unpaid" }
     ],
-    rawSummary: { action: "liquidateBond", bondId: p.bond.id }
+    rawSummary: { action: "liquidateBond", bondId: p.bond.id },
+    txAction: { type: "liquidate", assetId: p.bond.id }
   };
 }
 
@@ -344,7 +399,8 @@ function previewCancelBox(title: string, boxId: string, sub: string) {
     heroValue: shortenString(boxId, 14),
     heroSub: sub,
     rows: [{ label: "Action", value: "Cancel and refund" }],
-    rawSummary: { action: "cancelBox", boxId }
+    rawSummary: { action: "cancelBox", boxId },
+    txAction: { type: "cancel", boxId }
   };
 }
 
@@ -357,7 +413,8 @@ function previewRunMint(label: string, boxId: string) {
     heroLabel: "Request box",
     heroValue: shortenString(boxId, 14),
     rows: [{ label: "Action", value: label }],
-    rawSummary: { action: "runMint", boxId }
+    rawSummary: { action: "runMint", boxId },
+    txAction: { type: "mint", boxId }
   };
 }
 
@@ -374,11 +431,13 @@ function previewWrapNft(t: ZcWalletToken) {
       { label: "Token", value: shortenString(t.id, 14) },
       { label: "Receipt", value: `ZCS-Wrap-${t.id.slice(0, 6)}` }
     ],
-    rawSummary: { action: "wrapNft", tokenId: t.id }
+    rawSummary: { action: "wrapNft", tokenId: t.id },
+    txAction: { type: "createWrap", body: { tokenId: t.id } }
   };
 }
 
 function previewUnwrap(w: ZcPortfolioWrap) {
+  const receiptId = w.receiptId || w.id;
   previewPayload.value = {
     title: "Unwrap Custody Receipt",
     subtitle: "Burns receipt and releases the original NFT + 0.03 ERG reserve back to Nautilus",
@@ -386,9 +445,10 @@ function previewUnwrap(w: ZcPortfolioWrap) {
     tone: "cobalt",
     heroLabel: "Releases",
     heroValue: w.token.ticker,
-    heroSub: `Receipt ${shortenString(w.receiptId || w.id, 14)}`,
+    heroSub: `Receipt ${shortenString(receiptId, 14)}`,
     rows: [{ label: "Underlying token", value: shortenString(w.token.id, 14) }],
-    rawSummary: { action: "unwrapNft", receiptId: w.receiptId || w.id, innerTokenId: w.token.id }
+    rawSummary: { action: "unwrapNft", receiptId, innerTokenId: w.token.id },
+    txAction: { type: "unwrap", receiptId }
   };
 }
 </script>
@@ -422,7 +482,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
           v-else-if="wallet.connected"
           type="button"
           class="sf-mono inline-flex h-8 items-center gap-1.5 rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-card)] px-3 text-[11px] font-semibold text-[color:var(--sf-muted)] transition-colors hover:border-[color:var(--sf-line-cobalt)] hover:text-[color:var(--sf-ink)]"
-          @click="zc.refreshPortfolio()"
+          @click="syncPortfolio"
         >
           <refresh-cw-icon class="h-3 w-3" :class="zc.portfolio.loading ? 'animate-spin' : ''" />
           <span>Sync</span>
@@ -686,7 +746,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
               type="button"
               class="sf-seg-btn !h-7 !px-3 !text-[12px]"
               :class="activeTab === 'lend' ? 'is-active tone-bid' : ''"
-              @click="activeTab = 'lend'"
+              @click="selectTab('lend')"
             >
               Lending · {{ lendPositions.length }}
             </button>
@@ -694,7 +754,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
               type="button"
               class="sf-seg-btn !h-7 !px-3 !text-[12px]"
               :class="activeTab === 'borrow' ? 'is-active tone-ask' : ''"
-              @click="activeTab = 'borrow'"
+              @click="selectTab('borrow')"
             >
               <span>Borrowing · {{ borrowPositions.length }}</span>
               <span
@@ -708,7 +768,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
               type="button"
               class="sf-seg-btn !h-7 !px-3 !text-[12px]"
               :class="activeTab === 'open' ? 'is-active tone-cobalt' : ''"
-              @click="activeTab = 'open'"
+              @click="selectTab('open')"
             >
               Open Orders · {{ openItems.length }}
             </button>
@@ -716,7 +776,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
               type="button"
               class="sf-seg-btn !h-7 !px-3 !text-[12px]"
               :class="activeTab === 'wraps' ? 'is-active tone-cobalt' : ''"
-              @click="activeTab = 'wraps'"
+              @click="selectTab('wraps')"
             >
               Wraps &amp; Wallet · {{ zc.portfolio.wraps.length + zc.portfolio.walletTokens.length }}
             </button>
@@ -1620,6 +1680,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
         v-if="previewPayload"
         :payload="previewPayload"
         @close="previewPayload = null"
+        @submitted="syncPortfolio"
       />
     </transition>
   </div>

@@ -38,6 +38,7 @@ import {
   formatDur,
   formatDurCell,
   formatMarketAmount,
+  formatNumber,
   isBookRowRefreshingOnly,
   isHex64,
   isOracleRefreshingOnly,
@@ -601,7 +602,15 @@ function handleQuickFund(ask: ZcAskSummary) {
       yieldBps: Math.round(q.yieldBps),
       blocksLeft: q.d,
       maturity: q.maturity
-    }
+    },
+    txAction:
+      ask.kind === "order"
+        ? { type: "fillOrder", boxId: ask.id }
+        : {
+            type: "buyAsk",
+            boxId: ask.id,
+            units: ask.kind === "shares" ? BigInt(ask.units) : null
+          }
   };
 }
 
@@ -613,6 +622,49 @@ function handleBorrowAgainstOffer(params: { aprPct: number; days: number }) {
     side: "borrow",
     days: params.days,
     apr: params.aprPct
+  };
+}
+
+function handleQuickCancelAsk(ask: ZcAskSummary) {
+  const label =
+    ask.kind === "order"
+      ? "Borrow Order"
+      : ask.kind === "shares"
+        ? "Share Resale Ask"
+        : "Bond Resale Ask";
+  previewPayload.value = {
+    title: `Cancel & Refund ${label}`,
+    subtitle: "Returns everything locked in this open listing to your Nautilus wallet",
+    badge: `Cancel · ${ask.market}`,
+    tone: "ask",
+    heroLabel: "Box ID",
+    heroValue: shortenString(ask.boxId, 14),
+    heroSub: `${ask.market} · ${pricingName(ask)}`,
+    rows: [
+      { label: "Listing", value: label },
+      { label: "Action", value: "Cancel and refund to wallet" }
+    ],
+    rawSummary: { action: "cancelBox", boxId: ask.boxId },
+    txAction: { type: "cancel", boxId: ask.boxId }
+  };
+}
+
+function handleQuickCancelOffer(offer: ZcOfferSummary) {
+  previewPayload.value = {
+    title: "Cancel & Refund Lend Offer",
+    subtitle: `Returns remaining unspent ${offer.market} capital & ERG reserve to Nautilus`,
+    badge: `Cancel Offer · ${offer.market}`,
+    tone: "ask",
+    heroLabel: "Capital returned",
+    heroValue: formatMarketAmount(offer.capital, offer.market),
+    heroSub: `Offer ${shortenString(offer.id, 14)}`,
+    rows: [
+      { label: "Market", value: offer.market },
+      { label: "Reserve ERG", value: `${formatNumber(offer.reserve, 3, 0)} ERG` },
+      { label: "Delivery mode", value: offer.delivery }
+    ],
+    rawSummary: { action: "cancelOffer", offerId: offer.id, boxId: offer.boxId },
+    txAction: { type: "cancel", boxId: offer.boxId }
   };
 }
 
@@ -1042,6 +1094,8 @@ const pulse = computed(() => {
             @select-ask="selectAsk"
             @select-bid="selectBid"
             @quick-fund="handleQuickFund"
+            @quick-cancel-ask="handleQuickCancelAsk"
+            @quick-cancel-offer="handleQuickCancelOffer"
             @load-more-asks="loadMoreAsks"
             @load-more-offers="loadMoreOffers"
           />
@@ -1095,6 +1149,7 @@ const pulse = computed(() => {
             @close="selected = null"
             @borrow-against="handleBorrowAgainstOffer"
             @sell-against="handleSellAgainstOffer"
+            @preview="previewPayload = $event"
           />
           <order-ticket-panel
             v-else
@@ -1121,6 +1176,10 @@ const pulse = computed(() => {
         v-if="previewPayload"
         :payload="previewPayload"
         @close="previewPayload = null"
+        @submitted="
+          selected = null;
+          void fetchRateBook();
+        "
       />
     </transition>
   </div>

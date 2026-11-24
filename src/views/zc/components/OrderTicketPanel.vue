@@ -5,7 +5,7 @@ import { computed, onBeforeUnmount, ref, watch } from "vue";
 import { ExecutionPreviewPayload } from "./ExecutionPreviewModal.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
 import { ERG_DECIMALS, ERG_TOKEN_ID } from "@/constants";
-import { buildWalletLendDraft, zcApi } from "@/services/zcApi";
+import { buildOfferBody, buildOrderBody, buildWalletLendDraft, zcApi } from "@/services/zcApi";
 import { useWalletStore } from "@/stories";
 import {
   ZcCurves,
@@ -381,6 +381,24 @@ function openPreview() {
     const sim = lendSimSummary.value;
     const isDirect = amount.value != null && sim.count > 0;
     const rateBps = isDirect ? sim.avgBps : effectiveAprBps.value ?? 800;
+    const bpsInt = Math.max(0, Math.round(rateBps ?? 800));
+    const maxBlk = Math.max(DAY_BLOCKS, T.value);
+    const offerBody = !isDirect
+      ? buildOfferBody({
+          market: m,
+          capital: amount.value,
+          minYield: bpsInt,
+          points: [
+            { d: DAY_BLOCKS, y: bpsInt },
+            { d: Math.max(2 * DAY_BLOCKS, maxBlk), y: bpsInt }
+          ],
+          minBlocks: DAY_BLOCKS,
+          maxBlocks: maxBlk,
+          floor: props.filters.coverage,
+          expiry: props.height > 0 ? props.height + 5040 : undefined
+        })
+      : null;
+
     emit("preview", {
       title: isDirect ? `Direct Lend (${m})` : `Lend Offer (${m})`,
       subtitle: isDirect
@@ -416,10 +434,41 @@ function openPreview() {
         maxBlocks: T.value,
         minCoverPct: props.filters.coverage,
         aprBps: rateBps != null ? Math.round(rateBps) : null
-      }
+      },
+      txAction: isDirect
+        ? {
+            type: "walletLendBatch",
+            market: m,
+            steps: (simRes.value?.matches || []).map((mt, idx) => ({
+              boxId: mt.counterpartyId,
+              units: mt.units ? BigInt(mt.units) : null,
+              label: `Fill #${idx + 1} (${mt.counterpartyId.slice(0, 8)}…)`,
+              expectedCostRaw: mt.cost ? BigInt(mt.cost) : 0n
+            }))
+          }
+        : offerBody
+          ? { type: "createOffer", body: offerBody }
+          : null
     });
   } else if (side.value === "borrow") {
     const rep = borrowRepayment.value;
+    const orderBody = buildOrderBody({
+      market: m,
+      pricing: "fixed",
+      principal: amount.value,
+      repayment: rep,
+      mode: "fixed",
+      maturity: maturity.value,
+      exact: false,
+      collateral:
+        m === "ERG"
+          ? { erg: 0.001, usd: collAmount.value ?? 0, tokens: [] }
+          : { erg: collAmount.value ?? 0.001, usd: 0, tokens: [] },
+      rule: "oracle",
+      ratio: props.filters.coverage,
+      guard: props.filters.coverage
+    });
+
     emit("preview", {
       title: `Borrow Order (${m})`,
       subtitle: `Matures ${dateAtHeight(maturity.value, props.height)}`,
@@ -465,7 +514,8 @@ function openPreview() {
         collateralAsset: collAsset.value,
         collateralAmount: collAmount.value,
         liquidationRatioPct: props.filters.coverage
-      }
+      },
+      txAction: orderBody ? { type: "createOrder", body: orderBody } : null
     });
   } else {
     const price = salePrice.value;
@@ -503,6 +553,11 @@ function openPreview() {
         maturity: maturity.value,
         blocksLeft: D.value,
         aprBps: saleEffBps.value != null ? Math.round(saleEffBps.value) : null
+      },
+      studioRedirect: {
+        name: "zc-studio",
+        query: { type: "sell" },
+        label: "Pick Bond in Studio"
       }
     });
   }

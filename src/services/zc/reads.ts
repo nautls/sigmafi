@@ -478,6 +478,31 @@ export class ZcGraphqlEngine {
     return this.refresh(false, signal);
   }
 
+  /**
+   * Read-only accessor used by the isolated transaction planner (`src/services/zc/tx/`)
+   * to obtain the current chain book, resolver, matcher, and chain client without
+   * duplicating networking or snapshot logic.
+   */
+  async getTxReadContext(
+    forceRefresh = false,
+    signal?: AbortSignal
+  ): Promise<{
+    client: ZcChainClient;
+    resolver: ZcResolver;
+    book: ZcMarketBook;
+    matcher: ZcMatcher;
+    network: string;
+  }> {
+    const snap = forceRefresh ? await this.refresh(true, signal) : await this.ensureSnapshot(signal);
+    return {
+      client: this.client,
+      resolver: this.resolver,
+      book: snap.book,
+      matcher: this.buildMatcher(snap.book),
+      network: snap.network
+    };
+  }
+
   // ─── 1. info ────────────────────────────────────────────────────────────────
 
   async getInfo(

@@ -3,6 +3,7 @@ import {
   Box,
   EIP12UnsignedTransaction,
   ensureBigInt,
+  SignedTransaction as FleetSignedTransaction,
   isUndefined,
   some,
   utxoSum
@@ -13,8 +14,21 @@ import { acceptHMRUpdate, defineStore } from "pinia";
 import { computed, onBeforeMount, onUnmounted, ref, watch } from "vue";
 import { useChainStore } from "./chainStore";
 import { ERG_TOKEN_ID } from "@/constants";
+import type { NautilusSignOptions } from "@/services/zc/tx/types";
 import { AssetInfo } from "@/types";
 import { getNetworkType, showToast } from "@/utils";
+
+/**
+ * Extended Nautilus v2.0.0-beta.3+ EIP-12 interface supporting explicit per-input
+ * signer selection for ErgoTree v3 blind signing.
+ * Ref: https://docs.nautiluswallet.com/dapp-connector/wallet-interaction#choose-the-signing-address-of-each-input
+ */
+interface NautilusV3ErgoAPI extends EIP12ErgoAPI {
+  sign_tx(
+    tx: EIP12UnsignedTransaction,
+    options?: NautilusSignOptions
+  ): Promise<SignedTransaction>;
+}
 
 const WALLET_INJECTED_EVENT = "ergo-wallet:injected";
 
@@ -22,8 +36,8 @@ export const useWalletStore = defineStore("wallet", () => {
   const chain = useChainStore();
 
   // private
-  let _context: EIP12ErgoAPI | undefined;
-  let _boxes: Box<Amount>[];
+  let _context: NautilusV3ErgoAPI | undefined;
+  let _boxes: Box<Amount>[] = [];
   let _lastBoxFetch = 0;
 
   // private state
@@ -32,6 +46,7 @@ export const useWalletStore = defineStore("wallet", () => {
   const _loading = ref(false);
   const _connected = ref(false);
   const _usedAddresses = ref<string[]>([]);
+  const _unusedAddresses = ref<string[]>([]);
   const _wallets = ref<{ [key: string]: boolean }>({});
   const _connectedWallet = ref<"nautilus" | "safew" | string | undefined>();
 
@@ -46,6 +61,23 @@ export const useWalletStore = defineStore("wallet", () => {
   const loading = computed(() => _loading.value);
   const changeAddress = computed(() => _changeAddress.value);
   const usedAddresses = computed(() => _usedAddresses.value);
+  const unusedAddresses = computed(() => _unusedAddresses.value);
+  const allAddresses = computed(() => {
+    const seen = new Set<string>();
+    const out: string[] = [];
+    for (const a of [
+      ...(_changeAddress.value ? [_changeAddress.value] : []),
+      ..._usedAddresses.value,
+      ..._unusedAddresses.value
+    ]) {
+      const clean = a.trim();
+      if (clean && !seen.has(clean)) {
+        seen.add(clean);
+        out.push(clean);
+      }
+    }
+    return out;
+  });
   const connected = computed(() => _connected.value);
   const wallets = computed(() => _wallets.value);
   const connectedWallet = computed(() => _connectedWallet.value);
@@ -130,6 +162,7 @@ export const useWalletStore = defineStore("wallet", () => {
     localStorage.removeItem("connectedWallet");
     _context = undefined;
     _usedAddresses.value = [];
+    _unusedAddresses.value = [];
     _changeAddress.value = undefined;
     _balance.value = [];
     _connected.value = false;
@@ -144,9 +177,16 @@ export const useWalletStore = defineStore("wallet", () => {
       return;
     }
 
-    _usedAddresses.value = await _context.get_used_addresses();
-    _changeAddress.value = await _context.get_change_address();
-    const ergBalance = await _context.get_balance();
+    const [used, unused, change, ergBalance] = await Promise.all([
+      _context.get_used_addresses(),
+      _context.get_unused_addresses().catch(() => [] as string[]),
+      _context.get_change_address(),
+      _context.get_balance()
+    ]);
+
+    _usedAddresses.value = used;
+    _unusedAddresses.value = unused;
+    _changeAddress.value = change;
 
     _balance.value = [{ tokenId: ERG_TOKEN_ID, amount: ensureBigInt(ergBalance) }];
 
@@ -155,18 +195,18 @@ export const useWalletStore = defineStore("wallet", () => {
     }
   }
 
-  async function getBoxes() {
+  async function getBoxes(force = false) {
     if (!_context) {
       return [];
     }
 
-    if (Date.now() - _lastBoxFetch < 20000) {
+    if (!force && _boxes.length > 0 && Date.now() - _lastBoxFetch < 20000) {
       _loading.value = false;
 
       return _boxes;
     }
 
-    _boxes = await _context.get_utxos();
+    _boxes = (await _context.get_utxos()) ?? [];
     _lastBoxFetch = Date.now();
     updateBalances(_boxes);
 
@@ -195,20 +235,61 @@ export const useWalletStore = defineStore("wallet", () => {
     return changeAddress;
   }
 
-  async function signTx(unsignedTx: EIP12UnsignedTransaction) {
+  async function getUnusedAddresses() {
     if (!_context) {
       throw new Error("Wallet not connected.");
     }
 
+    const addrs = await _context.get_unused_addresses().catch(() => [] as string[]);
+    _unusedAddresses.value = addrs;
+    return addrs;
+  }
+
+  async function getUsedAddresses() {
+    if (!_context) {
+      throw new Error("Wallet not connected.");
+    }
+
+    const addrs = await _context.get_used_addresses();
+    _usedAddresses.value = addrs;
+    return addrs;
+  }
+
+  async function getCurrentHeight() {
+    if (_context) {
+      try {
+        const h = await _context.get_current_height();
+        if (Number.isInteger(h) && h > 0) return h;
+      } catch {
+        // fallback to chainStore height
+      }
+    }
+    return chain.height;
+  }
+
+  async function signTx(
+    unsignedTx: EIP12UnsignedTransaction,
+    options?: NautilusSignOptions
+  ) {
+    if (!_context) {
+      throw new Error("Wallet not connected.");
+    }
+
+    if (options && options.signers) {
+      return await _context.sign_tx(unsignedTx, options);
+    }
     return await _context.sign_tx(unsignedTx);
   }
 
-  async function submitTx(signedTx: SignedTransaction) {
+  async function submitTx(signedTx: SignedTransaction | FleetSignedTransaction) {
     if (!_context) {
       throw new Error("Wallet not connected.");
     }
 
-    return await _context.submit_tx(signedTx);
+    const txId = await _context.submit_tx(signedTx as SignedTransaction);
+    // Invalidate UTXO cache so subsequent reads & chained batch fills see spent boxes immediately.
+    _lastBoxFetch = 0;
+    return txId;
   }
 
   return {
@@ -216,6 +297,9 @@ export const useWalletStore = defineStore("wallet", () => {
     disconnect,
     getBoxes,
     getChangeAddress,
+    getUsedAddresses,
+    getUnusedAddresses,
+    getCurrentHeight,
     signTx,
     submitTx,
     wallets,
@@ -224,7 +308,9 @@ export const useWalletStore = defineStore("wallet", () => {
     balance,
     changeAddress,
     connected,
-    usedAddresses
+    usedAddresses,
+    unusedAddresses,
+    allAddresses
   };
 });
 

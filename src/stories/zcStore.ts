@@ -109,6 +109,7 @@ export const useZcStore = defineStore("zc", () => {
     const hashes = new Set<string>();
     const addrs = [
       ...wallet.usedAddresses,
+      ...wallet.unusedAddresses,
       ...(wallet.changeAddress ? [wallet.changeAddress] : [])
     ];
     for (const addr of addrs) {
@@ -577,6 +578,7 @@ export const useZcStore = defineStore("zc", () => {
       () => wallet.connected,
       () => wallet.changeAddress,
       () => wallet.usedAddresses.length,
+      () => wallet.unusedAddresses.length,
       () => wallet.balance.length
     ],
     () => {

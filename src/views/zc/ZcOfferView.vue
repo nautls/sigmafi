@@ -262,7 +262,8 @@ function openCancelPreview() {
       { label: "Reserve ERG", value: `${formatNumber(o.reserve, 3, 0)} ERG` },
       { label: "Delivery mode", value: o.delivery }
     ],
-    rawSummary: { action: "cancelOffer", offerId: o.id, boxId: o.boxId }
+    rawSummary: { action: "cancelOffer", offerId: o.id, boxId: o.boxId },
+    txAction: { type: "cancel", boxId: o.boxId }
   };
 }
 
@@ -755,6 +756,7 @@ function openSellAgainst() {
         v-if="previewPayload"
         :payload="previewPayload"
         @close="previewPayload = null"
+        @submitted="void loadOffer()"
       />
     </transition>
   </div>

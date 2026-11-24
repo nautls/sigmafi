@@ -176,7 +176,8 @@ function openPreview() {
         tone: matchingOfferCount.value > 0 ? "bid" : "default"
       }
     ],
-    rawSummary: { action: "fractionalize", bondId: position.value.bond.id, ...body }
+    rawSummary: { action: "fractionalize", bondId: position.value.bond.id, ...body },
+    txAction: { type: "fractionalize", assetId: position.value.bond.id, body }
   });
 }
 </script>

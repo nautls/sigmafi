@@ -662,7 +662,8 @@ function openPreview() {
         tone: matchCount.value > 0 ? "bid" : "default"
       }
     ],
-    rawSummary: { action: "createOrder", ...body }
+    rawSummary: { action: "createOrder", ...body },
+    txAction: { type: "createOrder", body }
   });
 }
 </script>
