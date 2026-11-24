@@ -880,30 +880,29 @@ const studioLink = computed(() => {
         <arrow-right-icon class="h-3.5 w-3.5" />
       </button>
 
+      <router-link
+        :to="studioLink"
+        class="sf-btn-outline flex h-9 w-full items-center justify-center gap-1.5 rounded-xl border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/50 px-4 text-[12px] font-semibold text-[color:var(--sf-cobalt)] transition-all hover:bg-[color:var(--sf-cobalt-soft)]"
+      >
+        <span>Full Studio</span>
+        <arrow-up-right-icon class="h-3.5 w-3.5" />
+      </router-link>
+
       <div class="flex items-center justify-between pt-0.5 text-[11px] text-[color:var(--sf-muted)]">
         <router-link
-          :to="studioLink"
-          class="inline-flex items-center gap-0.5 font-semibold text-[color:var(--sf-cobalt)] transition-colors hover:underline"
+          to="/app/auctions"
+          class="inline-flex items-center gap-0.5 font-medium transition-colors hover:text-[color:var(--sf-ink)]"
         >
-          <span>Full Studio</span>
-          <arrow-up-right-icon class="h-3 w-3" />
+          <span>Auctions</span>
+          <chevron-right-icon class="h-3 w-3" />
         </router-link>
-        <div class="flex items-center gap-3">
-          <router-link
-            to="/app/auctions"
-            class="inline-flex items-center gap-0.5 font-medium transition-colors hover:text-[color:var(--sf-ink)]"
-          >
-            <span>Auctions</span>
-            <chevron-right-icon class="h-3 w-3" />
-          </router-link>
-          <router-link
-            to="/app/portfolio"
-            class="inline-flex items-center gap-0.5 font-medium transition-colors hover:text-[color:var(--sf-ink)]"
-          >
-            <span>Portfolio</span>
-            <chevron-right-icon class="h-3 w-3" />
-          </router-link>
-        </div>
+        <router-link
+          to="/app/portfolio"
+          class="inline-flex items-center gap-0.5 font-medium transition-colors hover:text-[color:var(--sf-ink)]"
+        >
+          <span>Portfolio</span>
+          <chevron-right-icon class="h-3 w-3" />
+        </router-link>
       </div>
     </div>
   </aside>

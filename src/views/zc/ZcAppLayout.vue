@@ -12,6 +12,7 @@ import { useRoute, useRouter } from "vue-router";
 import MarketCoin from "@/components/MarketCoin.vue";
 import SigmaFiMark from "@/components/SigmaFiMark.vue";
 import ThemeToggle from "@/components/ThemeToggle.vue";
+import ZcKyaModal from "@/components/ZcKyaModal.vue";
 import { ERG_DECIMALS } from "@/constants";
 import {
   DEFAULT_MAINNET_EXPLORER_URL,
@@ -20,15 +21,18 @@ import {
   SIGMASPACE_GRAPHQL_URL,
   zcApi
 } from "@/services/zcApi";
-import { useWalletStore, useZcStore } from "@/stories";
+import { useUIStore, useWalletStore, useZcStore } from "@/stories";
 import { ZcMarket, ZcSearchHit } from "@/types/zc";
 import { shortenString } from "@/utils";
 import { formatApr } from "@/utils/zcMath";
 
 const zc = useZcStore();
 const wallet = useWalletStore();
+const ui = useUIStore();
 const route = useRoute();
 const router = useRouter();
+
+const kyaOpen = ref(!ui.isKYAAccepted.value);
 
 type ChainFeedMode = "explorer" | "graphql";
 
@@ -54,6 +58,8 @@ const activePresets = computed(() =>
 );
 
 const searchInputRef = ref<HTMLInputElement | null>(null);
+const headerRef = ref<HTMLElement | null>(null);
+const headerHeight = ref(62);
 const searchFocused = ref(false);
 const searchHits = ref<ZcSearchHit[]>([]);
 
@@ -177,6 +183,30 @@ function onSearchKeydown(e: KeyboardEvent) {
 
 watch(() => route.query.market, syncRouteMarket, { immediate: true });
 
+function syncHeaderHeight() {
+  const h = headerRef.value?.getBoundingClientRect().height;
+  if (h && h > 0) headerHeight.value = Math.ceil(h);
+}
+
+watch(
+  headerRef,
+  (el, _prev, onCleanup) => {
+    if (!el) return;
+    syncHeaderHeight();
+    window.addEventListener("resize", syncHeaderHeight);
+    let ro: ResizeObserver | null = null;
+    if (typeof ResizeObserver !== "undefined") {
+      ro = new ResizeObserver(syncHeaderHeight);
+      ro.observe(el);
+    }
+    onCleanup(() => {
+      window.removeEventListener("resize", syncHeaderHeight);
+      ro?.disconnect();
+    });
+  },
+  { immediate: true }
+);
+
 onMounted(() => {
   // Always use a direct Ergo blockchain feed (Explorer REST or GraphQL)
   if (zc.dataSource === "lithos") {
@@ -222,6 +252,7 @@ const isSingleScreen = computed(() => route.name === "zc-market" || route.name =
 
 const navItems = [
   { to: "/app", label: "Yield Curve", name: "zc-market" },
+  { to: "/app/market", label: "Market", name: "zc-listings" },
   { to: "/app/studio", label: "Studio", name: "zc-studio" },
   { to: "/app/auctions", label: "Auctions", name: "zc-auctions" },
   { to: "/app/portfolio", label: "Portfolio", name: "zc-portfolio" }
@@ -232,6 +263,7 @@ const navItems = [
   <div
     class="sf-shell relative flex min-h-screen flex-col overflow-x-clip"
     :class="isSingleScreen ? 'ratebook-viewport-lock' : ''"
+    :style="{ '--sf-header-h': `${headerHeight}px` }"
   >
     <!-- Landing-Unified Atmospheric Backdrop (subtle washes + faint parametric contours) -->
     <div class="pointer-events-none fixed inset-0 z-0 overflow-hidden" aria-hidden="true">
@@ -256,12 +288,12 @@ const navItems = [
     </div>
 
     <!-- Floating Frosted Capsule App Bar (matches LandingHeader.vue) -->
-    <header class="sticky top-0 z-40 shrink-0 px-3 pt-2.5 sm:px-4">
+    <header ref="headerRef" class="sticky top-0 z-40 shrink-0 px-3 pt-2.5 sm:px-4">
       <div
         class="sf-header app-capsule relative mx-auto flex min-h-[52px] max-w-[1680px] flex-wrap items-center justify-between gap-2 rounded-2xl border border-[color:var(--sf-line-strong)] px-3 py-1.5 backdrop-blur-xl sm:px-4"
       >
         <!-- Left: Brand + Primary Nav + Global '/' Lookup -->
-        <div class="flex items-center gap-3.5 lg:gap-4">
+        <div class="flex items-center gap-2.5 lg:gap-3">
           <router-link
             to="/"
             class="group inline-flex h-8 shrink-0 items-center gap-2 rounded-full transition-opacity hover:opacity-90"
@@ -272,21 +304,16 @@ const navItems = [
             >
               SigmaFi
             </span>
-            <span
-              class="sf-mono inline-flex h-[18px] items-center rounded-[4px] border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] px-1.5 text-[9px] font-semibold uppercase leading-none tracking-[0.12em] text-[color:var(--sf-cobalt)]"
-            >
-              V2
-            </span>
           </router-link>
 
           <span class="hidden h-4 w-px bg-[color:var(--sf-line)] md:block" aria-hidden="true" />
 
-          <nav class="hidden items-center gap-1 md:flex" aria-label="SigmaFi V2">
+          <nav class="hidden items-center gap-0.5 md:flex" aria-label="SigmaFi V2">
             <router-link
               v-for="item in navItems"
               :key="item.name"
               :to="item.to"
-              class="nav-pill inline-flex h-8 items-center gap-1.5 rounded-full px-3 text-[12.5px] font-medium transition-all"
+              class="nav-pill inline-flex h-8 items-center gap-1.5 rounded-full px-2.5 text-[12.5px] font-medium whitespace-nowrap transition-all"
               :class="
                 route.name === item.name
                   ? 'is-active text-[color:var(--sf-ink)]'
@@ -314,7 +341,7 @@ const navItems = [
           <div class="search-shell relative hidden sm:block">
             <div
               class="sf-input-well search-box flex h-8 items-center gap-1.5 rounded-xl px-2.5 transition-all duration-200"
-              :class="searchFocused ? 'w-60 lg:w-72' : 'w-44 lg:w-52'"
+              :class="searchFocused ? 'w-56 lg:w-64' : 'w-36 lg:w-40 xl:w-44'"
             >
               <search-icon
                 class="h-3.5 w-3.5 shrink-0 transition-colors"
@@ -689,6 +716,15 @@ const navItems = [
     >
       <router-view />
     </main>
+
+    <!-- Know Your Assumptions (KYA) Modal — shown once until accepted -->
+    <transition name="sf-modal">
+      <zc-kya-modal
+        v-if="kyaOpen"
+        :can-dismiss="ui.isKYAAccepted.value"
+        @close="kyaOpen = false"
+      />
+    </transition>
   </div>
 </template>
 

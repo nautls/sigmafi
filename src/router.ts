@@ -7,6 +7,7 @@ import ZcAppLayout from "./views/zc/ZcAppLayout.vue";
 import ZcAuctionsView from "./views/zc/ZcAuctionsView.vue";
 import ZcBondView from "./views/zc/ZcBondView.vue";
 import ZcMarketView from "./views/zc/ZcMarketView.vue";
+import ZcMarketplaceView from "./views/zc/ZcMarketplaceView.vue";
 import ZcOfferView from "./views/zc/ZcOfferView.vue";
 import ZcPortfolioView from "./views/zc/ZcPortfolioView.vue";
 import ZcStudioView from "./views/zc/ZcStudioView.vue";
@@ -18,6 +19,7 @@ const routes: RouteRecordRaw[] = [
     component: ZcAppLayout,
     children: [
       { path: "", name: "zc-market", component: ZcMarketView },
+      { path: "market", name: "zc-listings", component: ZcMarketplaceView },
       { path: "studio", name: "zc-studio", component: ZcStudioView },
       { path: "bond/:id?", name: "zc-bond", component: ZcBondView },
       { path: "offer/:id?", name: "zc-offer", component: ZcOfferView },

@@ -1,16 +1,16 @@
 <script setup lang="ts">
-import { useProgrammatic } from "@oruga-ui/oruga-next";
-import { ArrowRightIcon, ArrowUpRightIcon } from "@zhuowenli/vue-feather-icons";
-import { computed, onBeforeUnmount, onMounted } from "vue";
+import { ArrowRightIcon, ArrowUpRightIcon, HeartIcon } from "@zhuowenli/vue-feather-icons";
+import { computed, onBeforeUnmount, onMounted, ref } from "vue";
 import MarketCoin from "@/components/MarketCoin.vue";
 import SigmaFiMark from "@/components/SigmaFiMark.vue";
+import SupportDevModal from "@/components/SupportDevModal.vue";
+import ZcKyaModal from "@/components/ZcKyaModal.vue";
 import { ERG_TOKEN_ID } from "@/constants";
 import { vReveal } from "@/directives/vReveal";
 import { useChainStore, useZcStore } from "@/stories";
 import { ZcMarket } from "@/types/zc";
 import { formatBigNumber } from "@/utils";
 import { formatApr, formatCompact } from "@/utils/zcMath";
-import KYAView from "@/views/KYAView.vue";
 import DiscountSurface from "@/views/landing/DiscountSurface.vue";
 import HeroSigmaBackdrop from "@/views/landing/HeroSigmaBackdrop.vue";
 import HeroYieldExchange from "@/views/landing/HeroYieldExchange.vue";
@@ -22,7 +22,8 @@ import UnifiedCurveShowcase from "@/views/landing/UnifiedCurveShowcase.vue";
 
 const zc = useZcStore();
 const chain = useChainStore();
-const { oruga } = useProgrammatic();
+const supportOpen = ref(false);
+const kyaOpen = ref(false);
 
 onMounted(() => zc.start());
 onBeforeUnmount(() => zc.stop());
@@ -76,10 +77,7 @@ const marketCards = computed(() =>
 );
 
 function openKya() {
-  oruga.modal.open({
-    component: KYAView,
-    canCancel: true
-  });
+  kyaOpen.value = true;
 }
 </script>
 
@@ -498,15 +496,14 @@ function openKya() {
                     <span>Launch SigmaFi App</span>
                     <arrow-right-icon class="h-4 w-4" />
                   </router-link>
-                  <a
-                    href="https://sigmafi.gitbook.io/sigmafi-docs/"
-                    target="_blank"
-                    rel="noopener noreferrer"
-                    class="sf-btn-outline inline-flex h-12 items-center gap-1.5 rounded-full px-6 text-[14.5px]"
+                  <button
+                    type="button"
+                    class="sf-btn-outline inline-flex h-12 items-center gap-2 rounded-full px-6 text-[14.5px]"
+                    @click="supportOpen = true"
                   >
-                    <span>Documentation</span>
-                    <arrow-up-right-icon class="h-4 w-4 opacity-70" />
-                  </a>
+                    <heart-icon class="h-4 w-4 text-[color:var(--sf-cobalt)]" />
+                    <span>Support Development</span>
+                  </button>
                 </div>
               </div>
 
@@ -586,6 +583,14 @@ function openKya() {
               <li>
                 <router-link to="/app" class="transition-colors hover:text-[color:var(--sf-ink)]">
                   Yield Curve
+                </router-link>
+              </li>
+              <li>
+                <router-link
+                  to="/app/market"
+                  class="transition-colors hover:text-[color:var(--sf-ink)]"
+                >
+                  Market
                 </router-link>
               </li>
               <li>
@@ -686,11 +691,28 @@ function openKya() {
                   Know Your Assumptions (KYA)
                 </button>
               </li>
+              <li>
+                <button
+                  type="button"
+                  class="transition-colors hover:text-[color:var(--sf-ink)]"
+                  @click="supportOpen = true"
+                >
+                  Support Development
+                </button>
+              </li>
             </ul>
           </div>
         </div>
       </footer>
     </div>
+
+    <transition name="sf-modal">
+      <support-dev-modal v-if="supportOpen" @close="supportOpen = false" />
+    </transition>
+
+    <transition name="sf-modal">
+      <zc-kya-modal v-if="kyaOpen" :can-dismiss="true" @close="kyaOpen = false" />
+    </transition>
   </div>
 </template>
 

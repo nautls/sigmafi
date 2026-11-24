@@ -71,11 +71,6 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentClick)
           >
             SigmaFi
           </span>
-          <span
-            class="sf-mono rounded-[3px] border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold uppercase tracking-[0.12em] text-[color:var(--sf-cobalt)]"
-          >
-            V2
-          </span>
         </router-link>
 
         <nav class="hidden items-center gap-1 lg:flex" aria-label="Primary">

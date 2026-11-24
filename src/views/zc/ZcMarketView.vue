@@ -96,7 +96,7 @@ const matchable = ref<boolean>(true);
 const grid = ref<boolean>(false);
 const maturityMode = ref<"upto" | "near">("upto");
 const targetBlocks = ref<number>(90 * DAY_BLOCKS);
-const showFills = ref<boolean>(true);
+const showFills = ref<boolean>(false);
 const showOffers = ref<boolean>(false);
 const follow = ref<boolean>(false);
 const filtersOpen = ref<boolean>(false);
@@ -186,7 +186,7 @@ const extraFilterCount = computed(
     Number(grid.value) +
     Number(follow.value) +
     Number(showOffers.value) +
-    Number(!showFills.value)
+    Number(showFills.value)
 );
 
 /* ============================================================
@@ -685,7 +685,7 @@ function resetAllFilters() {
   matchable.value = true;
   grid.value = false;
   follow.value = false;
-  showFills.value = true;
+  showFills.value = false;
   showOffers.value = false;
 }
 
