@@ -441,8 +441,9 @@ export function buildBuyAskSpend(params: {
   readonly paid: bigint;
   readonly bondBox: ChainBox | null;
   readonly oracleBox: ChainBox | null;
+  readonly minValuePerByte?: bigint;
 }): ZcSpendDraft {
-  const { ask, askBox, sellerTree, units, paid, bondBox, oracleBox } = params;
+  const { ask, askBox, sellerTree, units, paid, bondBox, oracleBox, minValuePerByte } = params;
   const tag = registersFromList([encodeHexBytes(ask.boxId), encodeLong(units)]);
   const mToken = marketTokenId(ask.market);
 
@@ -473,7 +474,7 @@ export function buildBuyAskSpend(params: {
     };
     continuationOut = {
       ...contBase,
-      value: bigMax(ask.box.value, minBoxValue(contBase))
+      value: bigMax(ask.box.value, minBoxValue(contBase, 0, minValuePerByte))
     };
   }
 
@@ -549,8 +550,9 @@ export function buildRepaySpend(params: {
   readonly borrowerTree: string;
   readonly kept: bigint;
   readonly authBox: ChainBox | null;
+  readonly minValuePerByte?: bigint;
 }): ZcSpendDraft {
-  const { bond, bondBox, borrowerTree, kept, authBox } = params;
+  const { bond, bondBox, borrowerTree, kept, authBox, minValuePerByte } = params;
   if (kept > 0n && !authBox) {
     throw new ZcTxRefusalError("repaying from collateral needs the borrower's box");
   }
@@ -604,7 +606,7 @@ export function buildRepaySpend(params: {
   };
   const backOut: TxOutputDraft = {
     ...backBase,
-    value: bigMax(backErg, minBoxValue(backBase))
+    value: bigMax(backErg, minBoxValue(backBase, 0, minValuePerByte))
   };
 
   const inputs: EIP12UnsignedInput[] = [
@@ -767,8 +769,9 @@ export function buildClaimSharesSpend(params: {
   readonly vaultBox: ChainBox;
   readonly burned: bigint;
   readonly toTree: string;
+  readonly minValuePerByte?: bigint;
 }): ZcSpendDraft {
-  const { vault, vaultBox, burned, toTree } = params;
+  const { vault, vaultBox, burned, toTree, minValuePerByte } = params;
   const tag = registersFromList([encodeHexBytes(vault.boxId)]);
   const assets = vault.box.assets.slice(1);
 
@@ -786,7 +789,7 @@ export function buildClaimSharesSpend(params: {
       outputs: [
         {
           ...payoutBase,
-          value: bigMax(vault.box.value, minBoxValue(payoutBase))
+          value: bigMax(vault.box.value, minBoxValue(payoutBase, 0, minValuePerByte))
         }
       ],
       burn: [{ tokenId: vault.shareId, amount: vault.outstanding + vault.shares + 1n }],
@@ -838,11 +841,11 @@ export function buildClaimSharesSpend(params: {
     outputs: [
       {
         ...payoutBase,
-        value: bigMax(paidErg, minBoxValue(payoutBase))
+        value: bigMax(paidErg, minBoxValue(payoutBase, 0, minValuePerByte))
       },
       {
         ...contBase,
-        value: bigMax(vault.box.value - paidErg, minBoxValue(contBase))
+        value: bigMax(vault.box.value - paidErg, minBoxValue(contBase, 0, minValuePerByte))
       }
     ],
     burn: [{ tokenId: vault.shareId, amount: burned }],
@@ -941,8 +944,9 @@ export function buildPullSpend(params: {
   readonly source: ZcSettlement;
   readonly sourceBox: ChainBox;
   readonly height: bigint;
+  readonly minValuePerByte?: bigint;
 }): { readonly spend: ZcSpendDraft; readonly nextState: number | null; readonly ergTopUp: bigint } {
-  const { vault, vaultBox, source, sourceBox, height } = params;
+  const { vault, vaultBox, source, sourceBox, height, minValuePerByte } = params;
   const value = vault.box.value + source.box.value - vault.pullFee;
   if (value < 0n || !isValidLong(value)) {
     throw new ZcTxRefusalError("the pulled vault value overflows 64-bit nanoERG bounds");
@@ -1007,7 +1011,7 @@ export function buildPullSpend(params: {
     assets: [{ tokenId: vault.shareId, amount: vault.shares + 1n }, ...proceeds],
     additionalRegisters: registersFromList(regs)
   };
-  let minReq = minBoxValue(nextVaultBase);
+  let minReq = minBoxValue(nextVaultBase, 0, minValuePerByte);
   let finalValue = bigMax(value, minReq);
 
   // If dynamic minBoxValue raised the output ERG above `value` on a Dutch vault,
@@ -1021,7 +1025,7 @@ export function buildPullSpend(params: {
       value: finalValue,
       additionalRegisters: registersFromList(regs)
     };
-    minReq = minBoxValue(nextVaultBase);
+    minReq = minBoxValue(nextVaultBase, 0, minValuePerByte);
     finalValue = bigMax(value, minReq);
   }
 
@@ -1060,8 +1064,9 @@ export function buildBuyFromVaultSpend(params: {
   readonly vault: ZcShareVault;
   readonly vaultBox: ChainBox;
   readonly height: bigint;
+  readonly minValuePerByte?: bigint;
 }): ZcSpendDraft {
-  const { vault, vaultBox, height } = params;
+  const { vault, vaultBox, height, minValuePerByte } = params;
   const before = currencyHeld(vault);
   let after: bigint;
   if (excessAuction(vault)) {
@@ -1099,7 +1104,7 @@ export function buildBuyFromVaultSpend(params: {
     };
     soldOut = {
       ...soldBase,
-      value: bigMax(after, minBoxValue(soldBase))
+      value: bigMax(after, minBoxValue(soldBase, 0, minValuePerByte))
     };
   } else {
     const soldBase: TxOutputDraft = {
@@ -1108,7 +1113,7 @@ export function buildBuyFromVaultSpend(params: {
       assets: [reserve, { tokenId: cur, amount: after }, ...kept],
       additionalRegisters: regs
     };
-    const minErg = minBoxValue(soldBase);
+    const minErg = minBoxValue(soldBase, 0, minValuePerByte);
     soldOut = {
       ...soldBase,
       value: saleKeepsErg(vault) ? bigMax(vault.box.value, minErg) : minErg
@@ -1254,8 +1259,20 @@ export function assemblePostTx(params: {
   readonly height: number;
   readonly quote: ZcTxQuote;
   readonly limits?: ZcTxLimits;
+  readonly minValuePerByte?: bigint;
 }): ZcBuiltTx {
-  const { action, market, box, namedTreeHex, walletUtxos, walletBook, height, quote, limits } = params;
+  const {
+    action,
+    market,
+    box,
+    namedTreeHex,
+    walletUtxos,
+    walletBook,
+    height,
+    quote,
+    limits,
+    minValuePerByte
+  } = params;
 
   const targetErg = box.value + TX_FEE + HEADROOM;
   let funding: ChainBox[];
@@ -1292,13 +1309,17 @@ export function assemblePostTx(params: {
   const changeMinErg = (tokens: readonly ChainAsset[]): bigint =>
     tokens.length === 0
       ? MIN_BOX
-      : minBoxValue({
-          ergoTree: walletBook.changeTreeHex,
-          value: MIN_BOX,
-          creationHeight: height,
-          assets: tokens,
-          additionalRegisters: {}
-        });
+      : minBoxValue(
+          {
+            ergoTree: walletBook.changeTreeHex,
+            value: MIN_BOX,
+            creationHeight: height,
+            assets: tokens,
+            additionalRegisters: {}
+          },
+          0,
+          minValuePerByte
+        );
 
   // If change tokens exist (or change ERG falls below dynamic minBoxValue), pull more ERG boxes
   for (let pass = 0; pass < 3; pass++) {
@@ -1370,7 +1391,8 @@ export function assemblePostTx(params: {
     expectedMinted: null,
     expectedBurn: [],
     market,
-    limits
+    limits,
+    minValuePerByte
   });
 
   return {
@@ -1401,6 +1423,7 @@ export function assembleCancelTx(params: {
   readonly walletUtxos?: readonly ChainBox[];
   readonly height: number;
   readonly quote: ZcTxQuote;
+  readonly minValuePerByte?: bigint;
 }): ZcBuiltTx {
   const {
     box,
@@ -1409,7 +1432,8 @@ export function assembleCancelTx(params: {
     walletBook,
     walletUtxos = [],
     height,
-    quote
+    quote,
+    minValuePerByte
   } = params;
   const refundTree = refundTreeHex.toLowerCase();
   const chosenBoxes: ChainBox[] = [box, authBox];
@@ -1418,13 +1442,17 @@ export function assembleCancelTx(params: {
   const calcRefund = () => {
     const mergedAssets = mergeTokens(chosenBoxes.flatMap((b) => b.assets));
     const totalErg = chosenBoxes.reduce((acc, b) => acc + b.value, 0n) - TX_FEE;
-    const minReq = minBoxValue({
-      ergoTree: refundTree,
-      value: MIN_BOX,
-      creationHeight: height,
-      assets: mergedAssets,
-      additionalRegisters: {}
-    });
+    const minReq = minBoxValue(
+      {
+        ergoTree: refundTree,
+        value: MIN_BOX,
+        creationHeight: height,
+        assets: mergedAssets,
+        additionalRegisters: {}
+      },
+      0,
+      minValuePerByte
+    );
     return { mergedAssets, totalErg, minReq };
   };
 
@@ -1495,7 +1523,8 @@ export function assembleCancelTx(params: {
     walletBook,
     expectedMinted: null,
     expectedBurn: [],
-    market: null
+    market: null,
+    minValuePerByte
   });
 
   return {
@@ -1531,6 +1560,7 @@ export function assembleSpendTx(params: {
   readonly assetId?: string | null;
   readonly limits?: ZcTxLimits;
   readonly namedTreeHex?: string | null;
+  readonly minValuePerByte?: bigint;
 }): ZcBuiltTx {
   const {
     action,
@@ -1542,7 +1572,8 @@ export function assembleSpendTx(params: {
     quote,
     assetId = null,
     limits,
-    namedTreeHex = null
+    namedTreeHex = null,
+    minValuePerByte
   } = params;
 
   const initial = spendLeftover(spend, spend.inputs);
@@ -1558,13 +1589,17 @@ export function assembleSpendTx(params: {
   }
 
   const keptMinErg = (tokens: readonly ChainAsset[]): bigint =>
-    minBoxValue({
-      ergoTree: (spend.sweepToTree ?? walletBook.changeTreeHex).toLowerCase(),
-      value: MIN_BOX,
-      creationHeight: height,
-      assets: tokens,
-      additionalRegisters: {}
-    });
+    minBoxValue(
+      {
+        ergoTree: (spend.sweepToTree ?? walletBook.changeTreeHex).toLowerCase(),
+        value: MIN_BOX,
+        creationHeight: height,
+        assets: tokens,
+        additionalRegisters: {}
+      },
+      0,
+      minValuePerByte
+    );
 
   const initialMinKeep = carries ? keptMinErg(initialKeptTokens) : MIN_BOX;
   const selfFunded =
@@ -1704,7 +1739,8 @@ export function assembleSpendTx(params: {
     expectedMinted: spend.minted,
     expectedBurn: spend.burn,
     market,
-    limits
+    limits,
+    minValuePerByte
   });
 
   return {

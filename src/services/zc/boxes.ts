@@ -55,15 +55,20 @@ export function boxCandidateSize(box: BoxSizeInput, index = 0): number {
 }
 
 /**
- * Ergo consensus minimum box value (`max(MIN_BOX, boxSize * 360 nanoERG/byte)`), iterated
+ * Ergo consensus minimum box value (`max(MIN_BOX, boxSize * minValuePerByte)`), iterated
  * once in case raising `value` crosses a VLQ byte-length boundary.
  */
-export function minBoxValue(box: BoxSizeInput, index = 0): bigint {
+export function minBoxValue(
+  box: BoxSizeInput,
+  index = 0,
+  minValuePerByte: bigint = MIN_VALUE_PER_BYTE
+): bigint {
+  const rate = minValuePerByte > 0n ? minValuePerByte : MIN_VALUE_PER_BYTE;
   const cur = typeof box.value === "bigint" ? box.value : BigInt(box.value);
   const baseVal = cur > MIN_BOX ? cur : MIN_BOX;
-  const firstRaw = BigInt(boxCandidateSize({ ...box, value: baseVal }, index)) * MIN_VALUE_PER_BYTE;
+  const firstRaw = BigInt(boxCandidateSize({ ...box, value: baseVal }, index)) * rate;
   const first = firstRaw > MIN_BOX ? firstRaw : MIN_BOX;
-  const secondRaw = BigInt(boxCandidateSize({ ...box, value: first }, index)) * MIN_VALUE_PER_BYTE;
+  const secondRaw = BigInt(boxCandidateSize({ ...box, value: first }, index)) * rate;
   return secondRaw > first ? secondRaw : first;
 }
 

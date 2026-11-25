@@ -23,6 +23,7 @@ import {
   MAX_BOX_SIZE,
   MAX_COLLATERAL_TOKENS,
   MIN_BOX,
+  MIN_VALUE_PER_BYTE,
   minBoxValue,
   readZcBox,
   ZcAsk,
@@ -698,6 +699,13 @@ async function planAction(
   const h = BigInt(height);
   const ownTree = walletBook.changeTreeHex;
   const ownHash = walletBook.changeTreeHash;
+  const liveMinValPerByte = ctx.client.getChainParameters?.()?.minValuePerByte;
+  const minValuePerByte =
+    typeof liveMinValPerByte === "number" &&
+    Number.isInteger(liveMinValPerByte) &&
+    liveMinValPerByte > 0
+      ? BigInt(liveMinValPerByte)
+      : MIN_VALUE_PER_BYTE;
 
   // Helper to wrap posting actions uniformly
   const finishPost = (params: {
@@ -732,7 +740,8 @@ async function planAction(
           walletBook,
           height,
           quote,
-          limits
+          limits,
+          minValuePerByte
         })
     };
   };
@@ -776,7 +785,8 @@ async function planAction(
           quote,
           assetId: params.assetId ?? null,
           limits,
-          namedTreeHex: params.namedTreeHex ?? null
+          namedTreeHex: params.namedTreeHex ?? null,
+          minValuePerByte
         })
     };
   };
@@ -829,7 +839,7 @@ async function planAction(
           `Order box would be ${orderSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce collateral tokens or curve points.`
         );
       }
-      const minOrderErg = minBoxValue(box);
+      const minOrderErg = minBoxValue(box, 0, minValuePerByte);
       if (box.value < minOrderErg) {
         throw new ZcTxRefusalError(
           `Order box ERG (${box.value.toString()} nanoERG) is below the ${minOrderErg.toString()} nanoERG consensus minimum for its ${orderSize}-byte size.`
@@ -915,7 +925,7 @@ async function planAction(
           `This lend offer's post-first-fill continuation box would be ${projectedSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce curve points or delivery metadata size.`
         );
       }
-      const minOfferErg = minBoxValue(projectedCont);
+      const minOfferErg = minBoxValue(projectedCont, 0, minValuePerByte);
       if (box.value < minOfferErg) {
         throw new ZcTxRefusalError(
           `Offer box ERG (${box.value.toString()} nanoERG) is below the ${minOfferErg.toString()} nanoERG consensus minimum for its ${projectedSize}-byte continuation box.`
@@ -1028,7 +1038,7 @@ async function planAction(
           `Lot box would be ${lotSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce the number of tokens in the lot.`
         );
       }
-      const minLotErg = minBoxValue(box);
+      const minLotErg = minBoxValue(box, 0, minValuePerByte);
       if (box.value < minLotErg) {
         throw new ZcTxRefusalError(
           `Lot box ERG (${box.value.toString()} nanoERG) is below the ${minLotErg.toString()} nanoERG consensus minimum for its ${lotSize}-byte size.`
@@ -1238,13 +1248,17 @@ async function planAction(
 
       const creator = walletBook.byTreeHash.get(creatorHash.toLowerCase());
       const baseCancelMinErg = creator
-        ? minBoxValue({
-            ergoTree: creator.ergoTreeHex,
-            value: MIN_BOX,
-            creationHeight: height,
-            assets: box.assets,
-            additionalRegisters: {}
-          })
+        ? minBoxValue(
+            {
+              ergoTree: creator.ergoTreeHex,
+              value: MIN_BOX,
+              creationHeight: height,
+              assets: box.assets,
+              additionalRegisters: {}
+            },
+            0,
+            minValuePerByte
+          )
         : MIN_BOX;
       const neededAuthErg = bigMax(0n, baseCancelMinErg + TX_FEE - box.value);
       const auth = requireCreatorAuth(
@@ -1300,7 +1314,8 @@ async function planAction(
             walletBook,
             walletUtxos,
             height,
-            quote
+            quote,
+            minValuePerByte
           })
       };
     }
@@ -1513,7 +1528,8 @@ async function planAction(
         units,
         paid: price,
         bondBox: freshBondBox,
-        oracleBox: freshOracleBox
+        oracleBox: freshOracleBox,
+        minValuePerByte
       });
 
       const warnings = claimRes.ok
@@ -1605,7 +1621,7 @@ async function planAction(
         );
       }
       const knownBorrowerTree = walletBook.byTreeHash.get(bond.borrowerHash)?.ergoTreeHex;
-      const most = repayableFromCollateral(bond, knownBorrowerTree);
+      const most = repayableFromCollateral(bond, knownBorrowerTree, minValuePerByte);
       const kept =
         action.fromCollateral === "max"
           ? most
@@ -1638,7 +1654,8 @@ async function planAction(
         bondBox,
         borrowerTree,
         kept,
-        authBox
+        authBox,
+        minValuePerByte
       });
 
       const warnings =
@@ -1795,7 +1812,7 @@ async function planAction(
           `Resulting bond box would be ${afterSize} bytes (max ${MAX_BOX_SIZE} bytes).`
         );
       }
-      const minAfterErg = minBoxValue(afterOut);
+      const minAfterErg = minBoxValue(afterOut, 0, minValuePerByte);
       if (afterOut.value < minAfterErg) {
         throw new ZcTxRefusalError(
           `Resulting bond box value (${afterOut.value.toString()} nanoERG) is below the ${minAfterErg.toString()} nanoERG consensus minimum.`
@@ -2021,7 +2038,8 @@ async function planAction(
           vault,
           vaultBox,
           burned,
-          toTree: ownTree
+          toTree: ownTree,
+          minValuePerByte
         });
 
         const warnings: string[] = [];
@@ -2259,7 +2277,8 @@ async function planAction(
         vaultBox,
         source: sourceRec,
         sourceBox,
-        height: h
+        height: h,
+        minValuePerByte
       });
 
       const warnings: string[] = [];
@@ -2319,7 +2338,8 @@ async function planAction(
       const spend = buildBuyFromVaultSpend({
         vault,
         vaultBox,
-        height: h
+        height: h,
+        minValuePerByte
       });
 
       const before = currencyHeld(vault);

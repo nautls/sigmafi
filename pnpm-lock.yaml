@@ -182,8 +182,8 @@ importers:
         specifier: ^0.11.0
         version: 0.11.0
       '@hergmes/sdk':
-        specifier: ^0.1.0
-        version: 0.1.0
+        specifier: ^0.2.0
+        version: 0.2.0
       '@oruga-ui/oruga-next':
         specifier: ^0.7.0
         version: 0.7.0(vue@3.5.44(typescript@5.9.3))
@@ -484,8 +484,8 @@ packages:
     resolution: {integrity: sha512-EYun0nzxJn+23aOeaMM5COj62ibVrzgNOx2I6AM6P23mRs72I0Dv2prdBnU/lst4hqbNHi8a1E6UNvpjH2vhGQ==}
     engines: {node: '>=18'}
 
-  '@hergmes/sdk@0.1.0':
-    resolution: {integrity: sha512-N4kPPVCqCg3jOqU7TOiFK6qsi25Y8mgZkJiNP7v7+3DkU0tChvgp5kORgz1sttGv9+y4b3a1ZpBJ5sYB6FwU0g==}
+  '@hergmes/sdk@0.2.0':
+    resolution: {integrity: sha512-zWs2aG4eA9Sd78BiEYYHEaFt8AbPMB1fG+j7TRMuA1bkmFyKYjkKZYCcaZ81rRVWNGdLupG0Hy0FRvjf2yK0Fg==}
     engines: {node: '>=22'}
 
   '@humanwhocodes/config-array@0.13.0':
@@ -2369,7 +2369,7 @@ snapshots:
       '@fleet-sdk/common': 0.10.0
       '@fleet-sdk/crypto': 0.11.0
 
-  '@hergmes/sdk@0.1.0':
+  '@hergmes/sdk@0.2.0':
     dependencies:
       '@fleet-sdk/common': 0.10.0
       '@fleet-sdk/serializer': 0.11.0

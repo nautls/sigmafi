@@ -22,6 +22,7 @@ import {
   BlockRef,
   BoxPage,
   BoxView,
+  ChainParameters,
   ConfirmedBox,
   Key,
   PendingTx,
@@ -218,6 +219,7 @@ class MockSubscription implements Subscription {
 
 class MockRelay implements HergmesRelayLike {
   tip: BlockRef | undefined = undefined;
+  parameters: ChainParameters | undefined = undefined;
   closed = false;
   readonly subs = new Map<string, MockSubscription>();
   readonly subscribeOrder: string[] = [];
@@ -226,12 +228,27 @@ class MockRelay implements HergmesRelayLike {
   restTokenCalls: string[][] = [];
   restBoxesCalls: Key[] = [];
   restStatusCalls = 0;
+  restParametersCalls = 0;
 
   statusHandler: () => Promise<Status> = async () => ({
-    version: "0.1.0",
+    version: "0.2.0",
     network: "mainnet",
     tip: { height: 1_500_000, headerId: hexId("100") },
     ready: true
+  });
+
+  parametersHandler: () => Promise<ChainParameters> = async () => ({
+    height: 1_500_000,
+    blockVersion: 3,
+    storageFeeFactor: 1_250_000,
+    minValuePerByte: 360,
+    maxBlockSize: 524_288,
+    maxBlockCost: 7_000_000,
+    tokenAccessCost: 100,
+    inputCost: 2_000,
+    dataInputCost: 100,
+    outputCost: 100,
+    subblocksPerBlock: null
   });
 
   restBoxHandler: (boxId: string) => Promise<PoolBox> = async (id) => {
@@ -260,6 +277,10 @@ class MockRelay implements HergmesRelayLike {
       this.restStatusCalls++;
       return this.statusHandler();
     },
+    parameters: async () => {
+      this.restParametersCalls++;
+      return this.parametersHandler();
+    },
     boxes: async (key) => {
       this.restBoxesCalls.push(key);
       return this.restBoxesHandler(key);
@@ -284,8 +305,9 @@ class MockRelay implements HergmesRelayLike {
     };
   }
 
-  emitTip(next: BlockRef): void {
+  emitTip(next: BlockRef, params?: ChainParameters): void {
     this.tip = next;
+    if (params) this.parameters = params;
     for (const l of this.tipListeners) {
       l(next);
     }
@@ -735,26 +757,53 @@ async function main(): Promise<void> {
     await client.fetchTransactionsByAddresses(["9fAddr"], 1_400_000, 2);
     assertEq(historical.txAddrCalls.length, 1, "fetchTransactionsByAddresses delegates");
 
-    // fetchTokensByIds uses relay.rest.tokens
+    // fetchTokensByIds uses relay.rest.tokens with v0.2.0 TokenMetadata union (eip-4, none, omitted unknown)
     const tokId = hexId("555");
+    const noneTokId = hexId("557");
+    const unknownTokId = hexId("558");
     relay.restTokensHandler = async () => ({
       items: [
         {
           tokenId: tokId,
-          mintingBoxId: hexId("556"),
-          name: "SigUSD",
-          description: "AgeUSD stablecoin",
-          decimals: 2,
-          emission: "100000000"
+          mintingTxId: hexId("556"),
+          emission: "100000000",
+          standard: "eip-4",
+          metadata: {
+            name: "SigUSD",
+            description: "AgeUSD stablecoin",
+            decimals: 2
+          }
+        },
+        {
+          tokenId: noneTokId,
+          mintingTxId: hexId("559"),
+          emission: "42",
+          standard: "none"
         }
       ]
     });
-    const tokens = await client.fetchTokensByIds([tokId.toUpperCase(), tokId]);
+    const tokens = await client.fetchTokensByIds([
+      tokId.toUpperCase(),
+      tokId,
+      noneTokId,
+      unknownTokId
+    ]);
     assertEq(relay.restTokenCalls.length, 1, "tokens requested in one batch");
-    assertEq(relay.restTokenCalls[0].length, 1, "deduplicated token ids");
-    assertEq(tokens.get(tokId)?.name, "SigUSD", "token name mapped");
-    assertEq(tokens.get(tokId)?.decimals, 2, "token decimals mapped");
-    assertEq(tokens.get(tokId)?.emissionAmount, "100000000", "token emission mapped");
+    assertEq(relay.restTokenCalls[0].length, 3, "deduplicated token ids");
+    assertEq(tokens.get(tokId)?.name, "SigUSD", "eip-4 token name mapped");
+    assertEq(tokens.get(tokId)?.decimals, 2, "eip-4 token decimals mapped");
+    assertEq(tokens.get(tokId)?.description, "AgeUSD stablecoin", "eip-4 token description mapped");
+    assertEq(tokens.get(tokId)?.emissionAmount, "100000000", "eip-4 token emission mapped");
+    assertEq(tokens.get(noneTokId)?.name, null, "none-standard token has null name");
+    assertEq(tokens.get(noneTokId)?.description, null, "none-standard token has null description");
+    assertEq(tokens.get(noneTokId)?.decimals, 0, "none-standard token uses 0 decimals");
+    assertEq(tokens.get(noneTokId)?.emissionAmount, "42", "none-standard token emission mapped");
+    assertEq(tokens.has(unknownTokId), false, "omitted unknown token stays absent");
+
+    // fetchChainParameters REST fallback before live tip
+    const restParams = await client.fetchChainParameters();
+    assertEq(relay.restParametersCalls, 1, "REST parameters fetched once when not live");
+    assertEq(restParams?.minValuePerByte, 360, "REST parameters minValuePerByte mapped");
 
     // Start live stream with 1 live spendable box + 1 mempool-spent box
     await client.start();
@@ -862,15 +911,34 @@ async function main(): Promise<void> {
       assertEq(failRes.message, "Fee is below minimum", "error message preserved");
     }
 
-    // Live fast-path for fetchStateAndOracle & fetchAllUnspentZcBoxes uses 0 extra REST calls
+    // Live fast-path for fetchStateAndOracle, fetchAllUnspentZcBoxes & fetchChainParameters uses 0 extra REST calls
+    const tipWithParams: ChainParameters = {
+      height: 1_500_040,
+      blockVersion: 3,
+      storageFeeFactor: 1_250_000,
+      minValuePerByte: 500,
+      maxBlockSize: 524_288,
+      maxBlockCost: 7_000_000,
+      tokenAccessCost: 100,
+      inputCost: 2_000,
+      dataInputCost: 100,
+      outputCost: 100,
+      subblocksPerBlock: null
+    };
+    relay.emitTip(tip, tipWithParams);
     const statusCallsBefore = relay.restStatusCalls;
     const boxesCallsBefore = relay.restBoxesCalls.length;
+    const paramsCallsBefore = relay.restParametersCalls;
     const stateAndOracle = await client.fetchStateAndOracle();
     const allUnspent = await client.fetchAllUnspentZcBoxes();
+    const liveParams = await client.fetchChainParameters();
     assertEq(stateAndOracle.state.height, 1_500_040, "live fetchStateAndOracle height");
     assertEq(allUnspent.boxes.length, 1, "live fetchAllUnspentZcBoxes count");
+    assertEq(client.getChainParameters()?.minValuePerByte, 500, "live WS tip parameters cached");
+    assertEq(liveParams?.minValuePerByte, 500, "live fetchChainParameters returns WS parameters");
     assertEq(relay.restStatusCalls, statusCallsBefore, "0 REST status calls when live");
     assertEq(relay.restBoxesCalls.length, boxesCallsBefore, "0 REST boxes calls when live");
+    assertEq(relay.restParametersCalls, paramsCallsBefore, "0 REST parameters calls when live");
 
     client.dispose();
   });
@@ -1286,19 +1354,19 @@ async function main(): Promise<void> {
     hergmes.dispose();
   });
 
-  await runSuite("12. Step 9: Wallet live mempool overlay, 15-address cap & spendable UTXOs", async () => {
-    // 1. Address cap & priority selection
-    const used20 = Array.from({ length: 20 }, (_, i) => `9fUsed${String(i).padStart(2, "0")}`);
+  await runSuite("12. Step 9: Wallet live mempool overlay, 50-address cap & spendable UTXOs", async () => {
+    // 1. Address cap & priority selection (raised to 50 for Hergmes v0.2.0's 200-sub default)
+    const used60 = Array.from({ length: 60 }, (_, i) => `9fUsed${String(i).padStart(2, "0")}`);
     const selBig = selectTrackedWalletAddresses({
       changeAddress: "9fChange",
-      usedAddresses: used20,
+      usedAddresses: used60,
       unusedAddresses: ["9fUnused0", "9fUnused1", "9fUnused2"]
     });
-    assertEq(selBig.tracked.length, MAX_WALLET_HERGMES_ADDRS, "capped at 15 addresses");
-    assertEq(selBig.allCount, 24, "total unique count tracked");
-    assertEq(selBig.capped, true, "capped flag true for 24 addresses");
+    assertEq(selBig.tracked.length, MAX_WALLET_HERGMES_ADDRS, "capped at 50 addresses");
+    assertEq(selBig.allCount, 64, "total unique count tracked");
+    assertEq(selBig.capped, true, "capped flag true for 64 addresses");
     assertEq(selBig.tracked[0], "9fChange", "changeAddress prioritized first");
-    assertEq(selBig.tracked[1], "9fUsed19", "most recently used address prioritized next");
+    assertEq(selBig.tracked[1], "9fUsed59", "most recently used address prioritized next");
 
     // 2. Full coverage aggregation with confirmed + pending ERG/token deltas + mempool change box
     const relay = new MockRelay();
@@ -1358,7 +1426,7 @@ async function main(): Promise<void> {
     });
 
     const snap = manager.getSnapshot();
-    assertEq(snap.complete, true, "complete true when <= 15 addresses and all live");
+    assertEq(snap.complete, true, "complete true when <= 50 addresses and all live");
     assertEq(snap.hasPendingTx, true, "hasPendingTx true");
     assertEq(snap.pendingBalance.get(WALLET_ERG_TOKEN_ID), -1_000_000_000n, "net pending ERG aggregated across addresses");
     assertEq(snap.pendingBalance.get(tokId), 500n, "pending token delta aggregated");
@@ -1368,10 +1436,10 @@ async function main(): Promise<void> {
       "mempool change box converted cleanly to Box<Amount>"
     );
 
-    // 3. Oversized wallet (>15 addrs) keeps complete === false while still reporting tracked pending deltas
+    // 3. Oversized wallet (>50 addrs) keeps complete === false while still reporting tracked pending deltas
     manager.sync(relay, {
       changeAddress: addrA,
-      usedAddresses: used20,
+      usedAddresses: used60,
       unusedAddresses: []
     });
     for (const sub of relay.subs.values()) {
@@ -1380,9 +1448,9 @@ async function main(): Promise<void> {
       }
     }
     const cappedSnap = manager.getSnapshot();
-    assertEq(cappedSnap.trackedCount, 15, "only 15 holds open");
+    assertEq(cappedSnap.trackedCount, MAX_WALLET_HERGMES_ADDRS, "only 50 holds open");
     assertEq(cappedSnap.allLive, true, "all tracked holds live");
-    assertEq(cappedSnap.complete, false, "complete false when wallet exceeds 15-address cap");
+    assertEq(cappedSnap.complete, false, "complete false when wallet exceeds 50-address cap");
     assertEq(cappedSnap.hasPendingTx, true, "pending deltas still reported for tracked subset");
 
     // 4. Clean disconnect teardown
@@ -1394,7 +1462,142 @@ async function main(): Promise<void> {
     }
   });
 
-  console.log("\nAll 12 SigmaFi V2 Hergmes verification suites passed!");
+  await runSuite("13. Hergmes v0.2.0 live ChainParameters.minValuePerByte flows into tx builder", async () => {
+    const relay = new MockRelay();
+    const historical = new MockHistoricalClient();
+    const hergmes = new ZcHergmesClient(DEFAULT_MAINNET_HERGMES_URL, {
+      network: Network.Mainnet,
+      debounceMs: 10,
+      historicalClient: historical,
+      createRelay: () => relay
+    });
+    await hergmes.start();
+
+    const tip: BlockRef = { height: 1_500_080, headerId: hexId("a80") };
+    const elevatedParams: ChainParameters = {
+      height: 1_500_080,
+      blockVersion: 3,
+      storageFeeFactor: 1_250_000,
+      minValuePerByte: 2_500, // elevated via on-chain miner vote (> default 360)
+      maxBlockSize: 524_288,
+      maxBlockCost: 7_000_000,
+      tokenAccessCost: 100,
+      inputCost: 2_000,
+      dataInputCost: 100,
+      outputCost: 100,
+      subblocksPerBlock: null
+    };
+
+    const orderScript = getZcScript("Order", "ERG");
+    const orderAddr = getZcScriptAddress(orderScript, Network.Mainnet);
+    const partyTree = `0008cd02${"44".repeat(32)}`;
+    const partyAddr = ErgoAddress.fromErgoTree(partyTree, Network.Mainnet).encode(Network.Mainnet);
+    const partyHash = hex.encode(blake2b256(hex.decode(partyTree)));
+    const liqHash = "caa76cff5dc32ccc9546daa3025f4a051690d5970528ce9198b63fd3a76ba8fb";
+
+    // Order holding 15 tokens (~600+ bytes): at 360/B min is 1_000_000; at 2500/B min > 1_400_000!
+    const assets = Array.from({ length: 15 }, (_, i) => ({
+      tokenId: hexId(`7${String(i).padStart(2, "0")}`),
+      amount: 10n
+    }));
+    const orderBox = makeConfirmedBox({
+      boxId: hexId("0e2"),
+      value: 1_100_000n,
+      inclusionHeight: 1_500_075,
+      ergoTree: orderScript.ergoTreeHex,
+      assets,
+      additionalRegisters: {
+        R4: encodeLongs([12_000_000_000n, 10_000_000_000n, 1_500_000n, 1_510_000n, 1_505_000n, 5_000_000n, 0n]),
+        R5: encodeTokenPairs([]),
+        R6: encodeBytes(hex.decode(partyHash)),
+        R7: encodeBytes(hex.decode(liqHash))
+      }
+    });
+
+    relay.emitTip(tip, elevatedParams);
+    relay.setAllLive(
+      tip,
+      new Map([
+        [
+          `a:${orderAddr}`,
+          makeBoxView({ lastChange: tip, confirmed: [orderBox], pending: [] })
+        ]
+      ])
+    );
+
+    const orderRec = readZcBox(mapHergmesBox(orderBox)) as ZcOrder;
+    const book = buildMarketBook({
+      height: 1_500_080,
+      blockId: hexId("a80"),
+      revision: 1,
+      cut: false,
+      entries: new Map([[orderRec.boxId, { record: orderRec, height: 1_500_075 }]]),
+      confirmedOracle: null
+    });
+    const resolver = new ZcResolver(() => hergmes, { storage: null });
+    const walletAdapter: ZcWalletTxAdapter = {
+      network: Network.Mainnet,
+      async getAddresses() {
+        return { changeAddress: partyAddr, usedAddresses: [partyAddr], unusedAddresses: [] };
+      },
+      async getUtxos() {
+        return [
+          {
+            boxId: hexId("0d2"),
+            transactionId: hexId("dd02"),
+            index: 0,
+            ergoTree: partyTree,
+            creationHeight: 1_500_000,
+            value: "1000000", // auth box alone would yield 1.1M refund (< elevated minBoxValue)
+            assets: [],
+            additionalRegisters: {}
+          },
+          {
+            boxId: hexId("0d3"),
+            transactionId: hexId("dd03"),
+            index: 0,
+            ergoTree: partyTree,
+            creationHeight: 1_500_000,
+            value: "5000000", // extra funding box that assembleCancelTx must pull under elevated minValuePerByte
+            assets: [],
+            additionalRegisters: {}
+          }
+        ];
+      },
+      async getCurrentHeight() {
+        return 1_500_080;
+      },
+      async signTx() {
+        return { id: hexId("999"), inputs: [], dataInputs: [], outputs: [] } as unknown as SignedTransaction;
+      },
+      async submitTx() {
+        return hexId("999");
+      }
+    };
+
+    const deps: ZcTxDeps = {
+      wallet: walletAdapter,
+      async getReadContext() {
+        return {
+          client: hergmes,
+          resolver,
+          book,
+          matcher: new ZcMatcher(book, () => null),
+          network: "mainnet"
+        };
+      }
+    };
+
+    const built = await buildZcAction({ type: "cancel", boxId: orderBox.boxId }, deps);
+    assert(
+      BigInt(built.unsignedTx.outputs[0].value) > 1_400_000n,
+      `cancel refund output (${built.unsignedTx.outputs[0].value}) satisfies elevated 2500 nanoERG/B parameter`
+    );
+
+    hergmes.dispose();
+  });
+
+  console.log("\nAll 13 SigmaFi V2 Hergmes verification suites passed!");
 }
 
 main().catch((err) => {

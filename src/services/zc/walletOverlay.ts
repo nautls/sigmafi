@@ -3,7 +3,7 @@ import { Subscription, SubscriptionState } from "@hergmes/sdk";
 import { HergmesRelayLike } from "./hergmesClient";
 
 export const WALLET_ERG_TOKEN_ID = "ERG";
-export const MAX_WALLET_HERGMES_ADDRS = 15;
+export const MAX_WALLET_HERGMES_ADDRS = 50;
 const MAX_UNUSED_OVERLAY_ADDRS = 2;
 
 export interface WalletAddressInput {
@@ -44,8 +44,9 @@ export const EMPTY_WALLET_OVERLAY: WalletOverlaySnapshot = {
 };
 
 /**
- * Selects up to `maxAddresses` (default 15) wallet addresses to subscribe over the shared
- * Hergmes WebSocket so large HD wallets stay well under the relay's 100-subscription limit.
+ * Selects up to `maxAddresses` (default 50) wallet addresses to subscribe over the shared
+ * Hergmes WebSocket so large HD wallets stay well under the relay's 200-subscription limit
+ * (23 V2 protocol subscriptions + up to 50 wallet subscriptions = 73 max).
  * Priority: `changeAddress` first, then most recently used addresses, then up to 2 unused
  * addresses (and all remaining addresses whenever total <= `maxAddresses`).
  */

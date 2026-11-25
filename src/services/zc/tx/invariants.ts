@@ -32,6 +32,7 @@ export interface TxInvariantExpectation {
   readonly expectedBurn: readonly ChainAsset[];
   readonly market: ZcMarket | null;
   readonly limits?: ZcTxLimits;
+  readonly minValuePerByte?: bigint;
 }
 
 function isHex64(s: string): boolean {
@@ -62,8 +63,11 @@ export function assertTxInvariants(exp: TxInvariantExpectation): void {
     expectedMinted,
     expectedBurn,
     market,
-    limits
+    limits,
+    minValuePerByte
   } = exp;
+  const valuePerByte =
+    minValuePerByte !== undefined && minValuePerByte > 0n ? minValuePerByte : MIN_VALUE_PER_BYTE;
 
   const { inputs, dataInputs, outputs } = unsignedTx;
 
@@ -150,7 +154,7 @@ export function assertTxInvariants(exp: TxInvariantExpectation): void {
         `Output #${i} serialized size ${size} bytes exceeds Ergo consensus limit (${MAX_BOX_SIZE} bytes).`
       );
     }
-    const requiredMin = bigMax(MIN_BOX, BigInt(size) * MIN_VALUE_PER_BYTE);
+    const requiredMin = bigMax(MIN_BOX, BigInt(size) * valuePerByte);
     if (val < requiredMin) {
       throw new ZcTxInvariantError(
         `Output #${i} value ${val.toString()} is below required minimum box value (${requiredMin.toString()} for ${size} bytes).`

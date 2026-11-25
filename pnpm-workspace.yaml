@@ -2,4 +2,4 @@ allowBuilds:
   esbuild: true
   vue-demi: true
 minimumReleaseAgeExclude:
-  - '@hergmes/sdk@0.1.0'
+  - '@hergmes/sdk@0.2.0'

@@ -1,6 +1,7 @@
 import { Box, Network, SignedTransaction } from "@fleet-sdk/common";
 import {
   BlockRef,
+  ChainParameters,
   ConfirmedBox,
   Key,
   Relay,
@@ -66,9 +67,10 @@ export interface HergmesStreamError {
 export interface HergmesRelayLike {
   readonly rest: Pick<
     RestClient,
-    "status" | "boxes" | "box" | "tokens" | "submitTransaction"
+    "status" | "parameters" | "boxes" | "box" | "tokens" | "submitTransaction"
   >;
   readonly tip: BlockRef | undefined;
+  readonly parameters: ChainParameters | undefined;
   onTip(listener: (tip: BlockRef) => void): () => void;
   subscribe(key: { address: string }, options?: SubscribeOptions): Subscription;
   subscribe(key: Key): Subscription;
@@ -287,6 +289,7 @@ export class ZcHergmesClient implements ZcChainClient {
   private oracleSub: OracleSubSlot | null = null;
 
   private tip: BlockRef | null = null;
+  private chainParameters: ChainParameters | null = null;
   private validatedNetwork: "mainnet" | "testnet" | null = null;
   private streamPhase: HergmesStreamPhase = "idle";
   private lastError: HergmesStreamError | null = null;
@@ -367,6 +370,29 @@ export class ZcHergmesClient implements ZcChainClient {
 
   getTip(): BlockRef | null {
     return this.tip ? { height: this.tip.height, headerId: this.tip.headerId } : null;
+  }
+
+  getChainParameters(): ChainParameters | null {
+    return this.chainParameters ? { ...this.chainParameters } : null;
+  }
+
+  async fetchChainParameters(signal?: AbortSignal): Promise<ChainParameters | null> {
+    if (this.streamPhase === "live" && this.chainParameters) {
+      return { ...this.chainParameters };
+    }
+
+    const relay = this.requireRelay();
+    const timeout = withTimeoutSignal(signal, REQUEST_TIMEOUT_MS);
+    try {
+      const params = await relay.rest.parameters({ signal: timeout.signal });
+      this.chainParameters = { ...params };
+      return { ...params };
+    } catch (err) {
+      if (signal?.aborted) throw err;
+      throw wrapRelayFailure(err, "Hergmes chain parameters request failed", timeout.didTimeout());
+    } finally {
+      timeout.cleanup();
+    }
   }
 
   /**
@@ -678,13 +704,23 @@ export class ZcHergmesClient implements ZcChainClient {
       for (const item of items) {
         const id = String(item.tokenId).toLowerCase();
         if (!id) continue;
-        out.set(id, {
-          tokenId: id,
-          name: item.name || null,
-          decimals: item.decimals != null ? Number(item.decimals) : null,
-          description: item.description || null,
-          emissionAmount: item.emission != null ? String(item.emission) : null
-        });
+        if (item.standard === "eip-4") {
+          out.set(id, {
+            tokenId: id,
+            name: item.metadata.name || null,
+            decimals: Number(item.metadata.decimals),
+            description: item.metadata.description || null,
+            emissionAmount: item.emission != null ? String(item.emission) : null
+          });
+        } else {
+          out.set(id, {
+            tokenId: id,
+            name: null,
+            decimals: 0,
+            description: null,
+            emissionAmount: item.emission != null ? String(item.emission) : null
+          });
+        }
       }
       return out;
     } catch (err) {
@@ -913,8 +949,14 @@ export class ZcHergmesClient implements ZcChainClient {
           headerId: relay.tip.headerId.toLowerCase()
         };
       }
+      if (relay.parameters) {
+        this.chainParameters = { ...relay.parameters };
+      }
       this.unsubTip = relay.onTip((nextTip) => {
         if (session !== this.sessionId || this.disposed) return;
+        if (relay.parameters) {
+          this.chainParameters = { ...relay.parameters };
+        }
         const normalized: BlockRef = {
           height: nextTip.height,
           headerId: nextTip.headerId.toLowerCase()
@@ -1277,6 +1319,7 @@ export class ZcHergmesClient implements ZcChainClient {
       this.oracleSub = null;
     }
     this.tip = null;
+    this.chainParameters = null;
     this.validatedNetwork = null;
     this.pendingFillsDirty = false;
     this.spendableIndexDirty = true;

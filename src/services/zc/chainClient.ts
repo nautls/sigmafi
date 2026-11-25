@@ -54,6 +54,20 @@ export interface ChainTransaction {
   readonly outputs: readonly ChainBox[];
 }
 
+export interface ZcChainParameters {
+  readonly height: number;
+  readonly blockVersion: number;
+  readonly storageFeeFactor: number;
+  readonly minValuePerByte: number;
+  readonly maxBlockSize: number;
+  readonly maxBlockCost: number;
+  readonly tokenAccessCost: number;
+  readonly inputCost: number;
+  readonly dataInputCost: number;
+  readonly outputCost: number;
+  readonly subblocksPerBlock: number | null;
+}
+
 export interface GraphqlTokenInfo {
   readonly tokenId: string;
   readonly name: string | null;
@@ -65,6 +79,8 @@ export interface GraphqlTokenInfo {
 export interface ZcChainClient {
   getEndpoint(): string;
   setEndpoint(url: string): void;
+  getChainParameters?(): ZcChainParameters | null;
+  fetchChainParameters?(signal?: AbortSignal): Promise<ZcChainParameters | null>;
   fetchStateAndOracle(
     signal?: AbortSignal
   ): Promise<{ state: ChainState; oracle: ZcOracle | null }>;

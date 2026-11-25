@@ -455,16 +455,24 @@ export function saleKeepsErg(v: ZcShareVault): boolean {
  * The most of the repayment the bond's own collateral can pay: nanoERG above the return box's
  * consensus minimum value, or repayment token held.
  */
-export function repayableFromCollateral(bond: ZcBond, borrowerTree?: string): bigint {
+export function repayableFromCollateral(
+  bond: ZcBond,
+  borrowerTree?: string,
+  minValuePerByte?: bigint
+): bigint {
   const mToken = marketTokenId(bond.market);
   if (mToken === null) {
     const returnTree = borrowerTree ?? `0008cd${"02"}${"00".repeat(32)}`;
-    const minReturnErg = minBoxValue({
-      ergoTree: returnTree,
-      value: MIN_BOX,
-      assets: bond.collateral,
-      additionalRegisters: { R4: SColl(SByte, new Uint8Array(32)).toHex() }
-    });
+    const minReturnErg = minBoxValue(
+      {
+        ergoTree: returnTree,
+        value: MIN_BOX,
+        assets: bond.collateral,
+        additionalRegisters: { R4: SColl(SByte, new Uint8Array(32)).toHex() }
+      },
+      0,
+      minValuePerByte
+    );
     return bigMax(0n, bigMin(bond.repayment, bond.collateralErg - minReturnErg));
   }
   const held = bond.collateral
@@ -705,17 +713,25 @@ export function offerContinuationRegisters(o: ZcOffer): Record<string, string> {
  * Consensus minimum ERG (`max(MIN_BOX, serializedBytes * 360)`) required by `o`'s
  * post-fill continuation box when `remainingCapital` market tokens remain in it.
  */
-export function minContinuationErg(o: ZcOffer, remainingCapital = o.capital): bigint {
+export function minContinuationErg(
+  o: ZcOffer,
+  remainingCapital = o.capital,
+  minValuePerByte?: bigint
+): bigint {
   const mToken = marketTokenId(o.market);
   const assets: ChainAsset[] =
     mToken !== null && remainingCapital > 0n ? [{ tokenId: mToken, amount: remainingCapital }] : [];
-  return minBoxValue({
-    ergoTree: o.script.ergoTreeHex,
-    value: MIN_BOX,
-    creationHeight: o.box.creationHeight > 0 ? o.box.creationHeight : undefined,
-    assets,
-    additionalRegisters: offerContinuationRegisters(o)
-  });
+  return minBoxValue(
+    {
+      ergoTree: o.script.ergoTreeHex,
+      value: MIN_BOX,
+      creationHeight: o.box.creationHeight > 0 ? o.box.creationHeight : undefined,
+      assets,
+      additionalRegisters: offerContinuationRegisters(o)
+    },
+    0,
+    minValuePerByte
+  );
 }
 
 export function policyValid(o: ZcOffer): boolean {

@@ -171,12 +171,18 @@ export const useChainStore = defineStore("chain", () => {
           for (const item of items) {
             const low = item.tokenId.toLowerCase();
             resolved.add(low);
-            _metadata.value[low] = {
-              name: item.name || undefined,
-              decimals: item.decimals != null ? item.decimals : undefined,
-              type: mapHergmesAssetType(item.type),
-              url: item.artworkUrl || undefined
-            };
+            if (item.standard === "eip-4") {
+              _metadata.value[low] = {
+                name: item.metadata.name || undefined,
+                decimals: item.metadata.decimals,
+                type: mapHergmesAssetType(item.metadata.type),
+                url: item.metadata.artworkUrl || item.metadata.artworkCover || undefined
+              };
+            } else {
+              _metadata.value[low] = {
+                decimals: 0
+              };
+            }
           }
           remaining = tokenIds.filter((id) => !resolved.has(id.toLowerCase()));
         } catch {
