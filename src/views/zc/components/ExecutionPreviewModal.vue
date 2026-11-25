@@ -9,6 +9,7 @@ import {
   ChevronUpIcon,
   CopyIcon,
   ExternalLinkIcon,
+  LockIcon,
   RefreshCwIcon,
   ShieldIcon,
   XIcon,
@@ -16,6 +17,7 @@ import {
 } from "@zhuowenli/vue-feather-icons";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { DISABLE_V2_TX_SIGNING, V2_TX_SIGNING_DISABLED_MESSAGE } from "@/constants";
 import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
   buildZcAction,
@@ -230,6 +232,7 @@ const quoteFlowSummary = computed(() => {
 });
 
 const canSign = computed(() => {
+  if (DISABLE_V2_TX_SIGNING) return false;
   if (!hasExecutable.value || zc.demoMode || !wallet.connected) return false;
   if (phase.value !== "ready" && phase.value !== "error") return false;
   if (allRefusals.value.length > 0) return false;
@@ -371,7 +374,7 @@ function createSequentialBatchDeps(baseDeps: ZcTxDeps): ZcTxDeps {
 }
 
 async function executeSign() {
-  if (!canSign.value) return;
+  if (DISABLE_V2_TX_SIGNING || !canSign.value) return;
   const action = props.payload.txAction;
   if (!action) return;
 
@@ -674,6 +677,26 @@ async function copyTxId(txId: string) {
             </div>
           </div>
 
+          <!-- Preview Mode / Signing Disabled Notice -->
+          <div
+            v-if="DISABLE_V2_TX_SIGNING && hasExecutable && !zc.demoMode"
+            class="flex items-start gap-2.5 rounded-xl border border-amber-500/40 bg-amber-500/10 px-3.5 py-2.5 text-[11.5px] text-[color:var(--sf-ink-2)]"
+          >
+            <lock-icon class="mt-0.5 h-4 w-4 shrink-0 text-amber-500 dark:text-amber-300" />
+            <div>
+              <strong class="font-semibold text-[color:var(--sf-ink)]">
+                Preview Mode · V2 transaction signing disabled
+              </strong>
+              <p class="mt-0.5 text-[color:var(--sf-muted)]">
+                {{
+                  wallet.connected
+                    ? "Live V2 transaction signing and submission are temporarily turned off. You can still inspect live quotes and verify unsigned transactions below."
+                    : "Live V2 transaction signing and submission are temporarily turned off while SigmaFi V2 is in preview mode. You can still browse markets and inspect order previews."
+                }}
+              </p>
+            </div>
+          </div>
+
           <!-- Demo Mode Notice -->
           <div
             v-if="zc.demoMode && hasExecutable"
@@ -704,7 +727,7 @@ async function copyTxId(txId: string) {
 
           <!-- Disconnected Wallet Prompt -->
           <div
-            v-else-if="hasExecutable && !wallet.connected"
+            v-else-if="hasExecutable && !wallet.connected && !DISABLE_V2_TX_SIGNING"
             class="flex items-start gap-2.5 rounded-xl border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)]/55 px-3.5 py-2.5 text-[11.5px] text-[color:var(--sf-ink-2)]"
           >
             <shield-icon class="mt-0.5 h-4 w-4 shrink-0 text-[color:var(--sf-cobalt)]" />
@@ -946,6 +969,25 @@ async function copyTxId(txId: string) {
           >
             {{ payload.studioRedirect.label }}
           </button>
+
+          <template v-else-if="DISABLE_V2_TX_SIGNING && hasExecutable && !zc.demoMode">
+            <button
+              type="button"
+              class="sf-btn-outline h-8 rounded-full px-3.5 text-[12px]"
+              @click="emit('close')"
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              disabled
+              :title="V2_TX_SIGNING_DISABLED_MESSAGE"
+              class="sf-btn-cobalt inline-flex h-8 items-center gap-1.5 rounded-full px-4 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"
+            >
+              <lock-icon class="h-3.5 w-3.5" />
+              <span>Signing Disabled</span>
+            </button>
+          </template>
 
           <button
             v-else-if="hasExecutable && !wallet.connected && !zc.demoMode"

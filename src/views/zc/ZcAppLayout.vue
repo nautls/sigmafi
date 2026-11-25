@@ -2,6 +2,7 @@
 import { decimalize } from "@fleet-sdk/common";
 import {
   ArrowUpRightIcon,
+  LockIcon,
   RefreshCwIcon,
   SearchIcon,
   SlidersIcon,
@@ -13,7 +14,12 @@ import MarketCoin from "@/components/MarketCoin.vue";
 import SigmaFiMark from "@/components/SigmaFiMark.vue";
 import ThemeToggle from "@/components/ThemeToggle.vue";
 import ZcKyaModal from "@/components/ZcKyaModal.vue";
-import { ERG_DECIMALS, ERG_TOKEN_ID } from "@/constants";
+import {
+  DISABLE_V2_TX_SIGNING,
+  ERG_DECIMALS,
+  ERG_TOKEN_ID,
+  V2_TX_SIGNING_DISABLED_MESSAGE
+} from "@/constants";
 import {
   DEFAULT_MAINNET_EXPLORER_URL,
   DEFAULT_MAINNET_GRAPHQL_URL,
@@ -413,6 +419,15 @@ const navItems = [
               SigmaFi
             </span>
           </router-link>
+
+          <span
+            v-if="DISABLE_V2_TX_SIGNING"
+            class="sf-mono inline-flex h-6 shrink-0 items-center gap-1 rounded-full border border-amber-500/40 bg-amber-500/10 px-2 text-[10px] font-semibold uppercase tracking-[0.08em] text-amber-600 dark:text-amber-300"
+            :title="V2_TX_SIGNING_DISABLED_MESSAGE"
+          >
+            <lock-icon class="h-2.5 w-2.5 shrink-0" />
+            <span>Preview</span>
+          </span>
 
           <span class="hidden h-4 w-px bg-[color:var(--sf-line)] md:block" aria-hidden="true" />
 

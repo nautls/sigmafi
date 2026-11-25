@@ -10,23 +10,32 @@ import {
   buildZcAction,
   formatNautilusError,
   quoteZcAction,
+  signAndSubmitZcAction as rawSignAndSubmitZcAction,
   resolveWalletLendStep,
-  signAndSubmitZcAction,
+  ZcSubmitResult,
+  ZcTxAction,
   ZcTxDeps,
+  ZcTxLimits,
   ZcWalletTxAdapter
 } from "./zc/tx";
 import { zcGraphqlEngine } from "./zcApi";
+import { DISABLE_V2_TX_SIGNING, V2_TX_SIGNING_DISABLED_MESSAGE } from "@/constants";
 import type { useWalletStore } from "@/stories/walletStore";
 import { getNetworkType } from "@/utils";
 
-export {
-  buildZcAction,
-  formatNautilusError,
-  quoteZcAction,
-  resolveWalletLendStep,
-  signAndSubmitZcAction
-};
+export { buildZcAction, formatNautilusError, quoteZcAction, resolveWalletLendStep };
 export * from "./zc/tx/types";
+
+export async function signAndSubmitZcAction(
+  action: ZcTxAction,
+  deps: ZcTxDeps,
+  limits?: ZcTxLimits
+): Promise<ZcSubmitResult> {
+  if (DISABLE_V2_TX_SIGNING) {
+    throw new Error(V2_TX_SIGNING_DISABLED_MESSAGE);
+  }
+  return rawSignAndSubmitZcAction(action, deps, limits);
+}
 
 export function createZcTxDeps(wallet: ReturnType<typeof useWalletStore>): ZcTxDeps {
   const adapter: ZcWalletTxAdapter = {
@@ -46,9 +55,15 @@ export function createZcTxDeps(wallet: ReturnType<typeof useWalletStore>): ZcTxD
       return wallet.getCurrentHeight();
     },
     async signTx(unsignedTx, options) {
+      if (DISABLE_V2_TX_SIGNING) {
+        throw new Error(V2_TX_SIGNING_DISABLED_MESSAGE);
+      }
       return wallet.signTx(unsignedTx, options);
     },
     async submitTx(signedTx) {
+      if (DISABLE_V2_TX_SIGNING) {
+        throw new Error(V2_TX_SIGNING_DISABLED_MESSAGE);
+      }
       return wallet.submitTx(signedTx);
     }
   };
