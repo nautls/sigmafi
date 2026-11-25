@@ -32,14 +32,20 @@ const ergBalance = computed(() => {
       <div class="flex-1 gap-2">
         <router-link to="/" class="btn btn-ghost normal-case text-xl gap-2">
           <img :src="ui.isDark ? logoLightUrl : logoDarkUrl" alt="SigmaFi" width="40" height="40" />
+          <span class="badge badge-outline font-normal">V1</span>
           <span v-if="isTestnet" class="badge badge-outline font-normal">testnet</span></router-link
         >
         <ul class="menu menu-horizontal px-1 gap-2 hidden sm:inline-flex">
           <li>
-            <router-link to="/" active-class="active-item">Market</router-link>
+            <router-link to="/v1" exact-active-class="active-item">Market</router-link>
           </li>
           <li v-if="wallet.connected">
-            <router-link to="/dashboard" active-class="active-item">Dashboard</router-link>
+            <router-link to="/v1/dashboard" active-class="active-item">Dashboard</router-link>
+          </li>
+          <li>
+            <router-link to="/app" class="font-medium text-blue-600 dark:text-blue-400"
+              >ZC App ↗</router-link
+            >
           </li>
         </ul>
         <div v-if="chain.tvl?.gt(0)" class="text-sm opacity-80">

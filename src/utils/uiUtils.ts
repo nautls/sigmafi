@@ -63,13 +63,16 @@ export async function sendTransaction(
 }
 
 export function setSystemTheme() {
-  const isInDarkMode = window.matchMedia("(prefers-color-scheme: dark)").matches;
-
-  if (isInDarkMode) {
-    setTheme("dark");
-  } else {
-    setTheme("light");
+  try {
+    const saved = localStorage.getItem("sigmafi.theme");
+    if (saved === "dark" || saved === "light") {
+      setTheme(saved);
+      return;
+    }
+  } catch {
+    // The system preference is still available when storage is restricted.
   }
+  setTheme(window.matchMedia("(prefers-color-scheme: dark)").matches ? "dark" : "light");
 }
 
 export function toggleTheme() {
@@ -88,4 +91,9 @@ export function setTheme(theme: "light" | "dark") {
   }
 
   document.documentElement.setAttribute("data-theme", theme);
+
+  const meta = document.querySelector('meta[name="theme-color"]');
+  if (meta) {
+    meta.setAttribute("content", theme === "dark" ? "#070a10" : "#e8eef7");
+  }
 }

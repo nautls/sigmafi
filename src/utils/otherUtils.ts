@@ -116,11 +116,11 @@ export function pluralize(word: string, val: number) {
 }
 
 export function getNetworkType(): Network {
-  if (import.meta.env.PROD) {
+  if (import.meta.env?.PROD) {
     return Network.Mainnet;
   }
 
-  return import.meta.env.VITE_NETWORK === "testnet" ? Network.Testnet : Network.Mainnet;
+  return import.meta.env?.VITE_NETWORK === "testnet" ? Network.Testnet : Network.Mainnet;
 }
 
 export function stringifyBoxAmounts(box: Box): Box<string> {

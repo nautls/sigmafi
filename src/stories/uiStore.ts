@@ -1,15 +1,19 @@
 import { acceptHMRUpdate, defineStore } from "pinia";
-import { computed, onMounted, ref } from "vue";
+import { computed, ref } from "vue";
 import { getCurrentTheme, setTheme } from "@/utils";
+
+function readInitialKyaAccepted(): boolean {
+  try {
+    return localStorage.getItem("KYAAccepted") === "true";
+  } catch {
+    return false;
+  }
+}
 
 export const useUIStore = defineStore("ui", () => {
   // state
   const currentTheme = ref<"dark" | "light">(getCurrentTheme());
-  const _isKyaAccepted = ref(false);
-
-  onMounted(() => {
-    _isKyaAccepted.value = localStorage.getItem("KYAAccepted") === "true";
-  });
+  const _isKyaAccepted = ref(readInitialKyaAccepted());
 
   // computed
   const theme = computed(() => currentTheme);
@@ -18,7 +22,11 @@ export const useUIStore = defineStore("ui", () => {
 
   // actions
   function setAcceptedKYA() {
-    localStorage.setItem("KYAAccepted", "true");
+    try {
+      localStorage.setItem("KYAAccepted", "true");
+    } catch {
+      // Keep acceptance in memory when storage is restricted.
+    }
     _isKyaAccepted.value = true;
   }
 
@@ -30,6 +38,11 @@ export const useUIStore = defineStore("ui", () => {
     }
 
     setTheme(currentTheme.value);
+    try {
+      localStorage.setItem("sigmafi.theme", currentTheme.value);
+    } catch {
+      // Keep the theme for this session when storage is restricted.
+    }
   }
 
   return { theme, isDark, isKYAAccepted, toggleTheme, setAcceptedKYA };
