@@ -440,6 +440,12 @@ async function copyId() {
     radial-gradient(ellipse 52% 72% at 88% 82%, rgba(var(--sf-cobalt-rgb), 0.08), transparent 72%);
 }
 
+:root[data-theme="dark"] .offer-stage-glow {
+  background:
+    radial-gradient(ellipse 64% 80% at 15% 15%, rgba(var(--sf-bid-rgb), 0.06), transparent 72%),
+    radial-gradient(ellipse 52% 72% at 88% 82%, rgba(var(--sf-cobalt-rgb), 0.08), transparent 72%);
+}
+
 @keyframes sfCardLiftIn {
   from {
     opacity: 0;

@@ -420,7 +420,12 @@ function openKya() {
                 v-if="zc.connected && card.snap.curves && card.offerCount + card.askCount > 0"
                 class="sf-stage-sharp my-5 px-3.5 py-2.5"
               >
-                <market-sparkline :curves="card.snap.curves" />
+                <market-sparkline
+                  :curves="card.snap.curves"
+                  :asks="card.snap.asks"
+                  :height="zc.height"
+                  :oracle-refreshing="zc.oracle.refreshPending"
+                />
               </div>
 
               <dl
@@ -718,10 +723,16 @@ function openKya() {
 
 <style scoped>
 .hero-headline {
-  font-size: clamp(2.4rem, 3.85vw, 3.7rem);
+  font-size: clamp(2.4rem, 11.8vw, 2.9rem);
   font-weight: 500;
   line-height: 1.04;
   letter-spacing: -0.04em;
+}
+
+@media (min-width: 640px) {
+  .hero-headline {
+    font-size: clamp(2.9rem, 4.65vw, 4.5rem);
+  }
 }
 
 .hero-shimmer {
