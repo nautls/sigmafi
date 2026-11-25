@@ -107,27 +107,42 @@ const BUILTIN_VERIFIERS: TokenVerifier[] = [
     priority: 85,
     matches: ({ token, isWrappedInner }) => !isWrappedInner && token.kind === "receipt",
     verify: ({ token }) => {
+      const receiptVerified = token.verified !== false;
       const innerResult = token.wraps ? verifyWrappedAsset(token.wraps) : null;
       const innerVerified = innerResult?.status === "verified";
+      const status: TokenVerificationStatus = !receiptVerified
+        ? "unverified"
+        : innerVerified
+          ? "verified"
+          : innerResult?.status ?? "unverifiable";
+      const badge = !receiptVerified
+        ? "Custody unverified"
+        : innerVerified
+          ? "Custody + Asset Verified"
+          : "Underlying not verifiable yet";
       return {
-        status: innerVerified ? "verified" : innerResult?.status ?? "unverifiable",
+        status,
         verifierId: "zcs1-wrap-receipt",
-        badge: innerVerified ? "Custody + Asset Verified" : "Underlying not verifiable yet",
-        summary:
-          "ZCS custody wrap receipt. The wrapped token stays locked in a custody vault until this receipt is burned to unwrap.",
-        note: innerVerified ? undefined : innerResult?.note || SPECIAL_LP_NOTE,
+        badge,
+        summary: receiptVerified
+          ? "ZCS custody wrap receipt. The wrapped token stays locked in a custody vault until this receipt is burned to unwrap."
+          : "Wrap receipt custody origin could not be verified as a standard zcs1 wrap vault.",
+        note: !receiptVerified
+          ? "This receipt was not verified as originating from a standard zcs1 wrap mint. Verify the custody vault on chain before trusting it."
+          : innerVerified
+            ? undefined
+            : innerResult?.note || SPECIAL_LP_NOTE,
         checks: [
           {
             label: "Custody receipt",
-            ok: token.verified !== false,
-            detail:
-              token.verified !== false
-                ? "Standard zcs1 custody wrap vault"
-                : "Wrap vault origin not yet verified"
+            ok: receiptVerified,
+            detail: receiptVerified
+              ? "Standard zcs1 custody wrap vault"
+              : "Wrap vault origin not verified"
           },
           {
             label: "Underlying token",
-            ok: innerVerified ? true : null,
+            ok: innerVerified ? true : innerResult?.status === "unverified" ? false : null,
             detail: innerResult
               ? `${innerResult.badge} (${innerResult.verifierId})`
               : "No verifier registered for underlying token"

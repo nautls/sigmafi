@@ -122,19 +122,24 @@ export function normalizeWalletUtxo(box: Box<Amount>): ChainBox {
  * Selects a single unspent wallet box sitting at `creatorTreeHex` to authorize
  * creator-only contract paths (`cancel`, `repay` from collateral, `recollateralize`, `extinguish`).
  *
- * Matches `ZcWriteExecution.authCandidates`: prefers a box holding `preferToken` (when set),
- * then smallest nanoERG value, then lexicographic `boxId`.
+ * Prefers a box holding `preferToken` (when set), then boxes meeting `minValue` (when set),
+ * then clean / token-light boxes (when `preferClean` is set), then smallest nanoERG value,
+ * then lexicographic `boxId`.
  */
 export function selectAuthBox(
   utxos: readonly ChainBox[],
   creatorTreeHex: string,
   opts?: {
     readonly preferToken?: string;
+    readonly preferClean?: boolean;
+    readonly minValue?: bigint;
     readonly excludeBoxIds?: ReadonlySet<string>;
   }
 ): ChainBox | null {
   const targetTree = creatorTreeHex.toLowerCase();
   const prefer = opts?.preferToken?.toLowerCase() ?? null;
+  const preferClean = opts?.preferClean ?? false;
+  const minValue = opts?.minValue ?? null;
   const exclude = opts?.excludeBoxIds;
 
   const candidates = utxos.filter(
@@ -147,6 +152,17 @@ export function selectAuthBox(
       const ha = a.assets.some((t) => t.tokenId === prefer) ? 0 : 1;
       const hb = b.assets.some((t) => t.tokenId === prefer) ? 0 : 1;
       if (ha !== hb) return ha - hb;
+    }
+    if (minValue !== null) {
+      const ma = a.value >= minValue ? 0 : 1;
+      const mb = b.value >= minValue ? 0 : 1;
+      if (ma !== mb) return ma - mb;
+    }
+    if (preferClean) {
+      const ca = a.assets.length === 0 ? 0 : 1;
+      const cb = b.assets.length === 0 ? 0 : 1;
+      if (ca !== cb) return ca - cb;
+      if (a.assets.length !== b.assets.length) return a.assets.length - b.assets.length;
     }
     if (a.value !== b.value) return a.value < b.value ? -1 : 1;
     return a.boxId < b.boxId ? -1 : a.boxId > b.boxId ? 1 : 0;

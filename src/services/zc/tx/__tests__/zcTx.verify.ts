@@ -49,9 +49,13 @@ import {
   ZC_SCRIPTS,
   ZC_SIGUSD_TOKEN_ID
 } from "../../contracts";
-import { buildDraftOffer, buildDraftOrder } from "../../drafts";
+import { selectSpectrumTokenRates } from "../../../assetPricingService";
+import { SPECTRUM_ERG_TOKEN_ID } from "../../../spectrumService";
+import { buildDraftOffer, buildDraftOrder, simulateDraft } from "../../drafts";
+import { ZcJson } from "../../json";
 import { buildMarketBook, openOf, ZcMatcher } from "../../matcher";
 import { ZcResolver } from "../../resolver";
+import { verifyToken } from "../../tokenVerification";
 import {
   belowOwnRatio,
   lotTarget,
@@ -84,6 +88,7 @@ import {
   registersFromList,
   resolveWalletLendStep,
   ruleFields,
+  selectAuthBox,
   sharesMetadata,
   signAndSubmitZcAction,
   TX_FEE,
@@ -1831,6 +1836,433 @@ async function runAll(): Promise<void> {
       unwrapSpend.burn,
       [{ tokenId: customReceipt, amount: 4n }],
       "FS-7: buildUnwrapSpend must burn actual vaultLocked + holderCount (4n)"
+    );
+  });
+
+  // 22. Security audit regression tests (V2 Findings #1-#6)
+  await test("22. V2 Audit Fixes #1-#6 (Direct Lend, Cancel Top-up, SigUSD ERG Limits, Wrap Verification, Spectrum Pricing)", async () => {
+    const fakeOracleBox = makeChainBox({
+      id: hexId(0xe1),
+      ergoTree: ZC_ORACLE_V2_ERGO_TREE,
+      value: 10_000_000n,
+      assets: [{ tokenId: ZC_ORACLE_V2_NFT, amount: 1n }],
+      additionalRegisters: registersFromList([encodeLong(1_000_000_000n), encodeInt(100)]),
+      creationHeight: HEIGHT - 2
+    });
+    const fakeOracle: ZcOracle = { box: fakeOracleBox, price: 1_000_000_000n, epoch: 100 };
+
+    // --- Finding #1: simulateWalletLend ---
+    const mkOrderBox = (
+      idSeed: number,
+      principal: bigint,
+      repayment: bigint,
+      ratioBps: number,
+      collateralSigUsd: bigint
+    ): ChainBox => {
+      const d = buildDraftOrder(
+        {
+          market: "ERG",
+          pricing: "fixed",
+          principal: principal.toString(),
+          repayment: repayment.toString(),
+          timing: { mode: "fixed", maturity: HEIGHT + 262_800, exact: true },
+          collateral: {
+            nanoErg: MIN_BOX.toString(),
+            tokens: [{ tokenId: ZC_SIGUSD_TOKEN_ID, amount: collateralSigUsd.toString() }]
+          },
+          rule: { kind: "oracle", ratioBps }
+        },
+        BigInt(HEIGHT)
+      );
+      const out = buildOrderOutput(d, HASH_CP, HEIGHT);
+      return makeChainBox({
+        id: hexId(idSeed),
+        ergoTree: out.ergoTree,
+        value: out.value,
+        assets: out.assets,
+        additionalRegisters: out.additionalRegisters as Record<string, string>
+      });
+    };
+
+    // Negative APR (principal 10 ERG > repayment 9 ERG), 0% APR (10 -> 10),
+    // low liquidation ratio (125% ratio despite 250% cover),
+    // valid 5% APR @ 175% ratio, valid 12% APR @ 175% ratio
+    const negOrder = mkOrderBox(0xa1, 10n * ERG, 9n * ERG, 17_500, 2000n);
+    const zeroOrder = mkOrderBox(0xa2, 10n * ERG, 10n * ERG, 17_500, 2000n);
+    const lowRatioOrder = mkOrderBox(0xa3, 10n * ERG, 12n * ERG, 12_500, 3000n);
+    const apr5Order = mkOrderBox(0xa4, 10n * ERG, (105n * ERG) / 10n, 17_500, 2500n);
+    const apr12Order = mkOrderBox(0xa5, 10n * ERG, (112n * ERG) / 10n, 17_500, 2500n);
+
+    const lendEntries = new Map<string, ZcEntry>();
+    for (const bx of [negOrder, zeroOrder, lowRatioOrder, apr5Order, apr12Order]) {
+      lendEntries.set(bx.boxId, { record: readZcBox(bx)!, height: HEIGHT });
+    }
+    const lendBook = buildMarketBook({
+      height: HEIGHT,
+      blockId: hexId(0xaa),
+      revision: 1,
+      cut: false,
+      entries: lendEntries,
+      confirmedOracle: fakeOracle
+    });
+    const lendKnown = {
+      mine: () => false,
+      disclosed: () => true,
+      chain: () => null,
+      origin: () => null
+    };
+    const lendMatcher = new ZcMatcher(lendBook, () => null);
+    const lendJson = new ZcJson(lendMatcher, lendKnown);
+
+    // Without minYieldBps, must ONLY match positive-APR orders with ratio >= 175% (apr12 + apr5)
+    const simAll = simulateDraft(
+      {
+        type: "walletLend",
+        market: "ERG",
+        amount: (100n * ERG).toString(),
+        to: 300_000,
+        coverage: 17_500
+      },
+      lendMatcher,
+      lendJson
+    ) as { matches: { counterpartyId: string; yieldBps: number }[] };
+    const matchedIds = simAll.matches.map((m) => m.counterpartyId);
+    assert.deepEqual(
+      matchedIds,
+      [apr12Order.boxId, apr5Order.boxId],
+      "Finding #1: negative-APR, 0%-APR, and below-liquidation-ratio orders must be excluded"
+    );
+
+    // With minYieldBps = 1000 (10%), must exclude apr5Order and match ONLY apr12Order
+    const simMinApr = simulateDraft(
+      {
+        type: "walletLend",
+        market: "ERG",
+        amount: (100n * ERG).toString(),
+        to: 300_000,
+        coverage: 17_500,
+        minYieldBps: 1000
+      },
+      lendMatcher,
+      lendJson
+    ) as { matches: { counterpartyId: string }[] };
+    assert.deepEqual(
+      simMinApr.matches.map((m) => m.counterpartyId),
+      [apr12Order.boxId],
+      "Finding #1: minYieldBps must filter out below-APR orders"
+    );
+
+    // With null oracle, must match ZERO orders (no null-oracle cover bypass)
+    const noOracleBook = buildMarketBook({
+      height: HEIGHT,
+      blockId: hexId(0xaa),
+      revision: 1,
+      cut: false,
+      entries: lendEntries,
+      confirmedOracle: null
+    });
+    const noOracleMatcher = new ZcMatcher(noOracleBook, () => null);
+    const noOracleJson = new ZcJson(noOracleMatcher, lendKnown);
+    const simNoOracle = simulateDraft(
+      {
+        type: "walletLend",
+        market: "ERG",
+        amount: (100n * ERG).toString(),
+        to: 300_000,
+        coverage: 15_000
+      },
+      noOracleMatcher,
+      noOracleJson
+    ) as { matches: unknown[]; outcome: string };
+    assert.equal(simNoOracle.matches.length, 0, "Finding #1: null oracle must yield zero matches");
+    assert.equal(simNoOracle.outcome, "waiting");
+
+    // resolveWalletLendStep preserves maturity ONLY for window orders
+    const winDraft = buildDraftOrder(
+      {
+        market: "ERG",
+        pricing: "window",
+        principal: (2n * ERG).toString(),
+        repayment: (22n * ERG / 10n).toString(),
+        timing: { mode: "window", minDuration: 1000, maxDuration: 50_000 },
+        curve: { capBps: 1200, points: [{ blocks: 1000, bps: 800 }, { blocks: 50_000, bps: 1200 }] },
+        collateral: { nanoErg: (5n * ERG).toString() },
+        rule: { kind: "oracle", ratioBps: 15_000 }
+      },
+      BigInt(HEIGHT)
+    );
+    const winOut = buildOrderOutput(winDraft, HASH_CP, HEIGHT);
+    const winBox = makeChainBox({
+      id: hexId(0xa6),
+      ergoTree: winOut.ergoTree,
+      value: winOut.value,
+      assets: winOut.assets,
+      additionalRegisters: winOut.additionalRegisters as Record<string, string>
+    });
+    h.registerRecord(winBox);
+    const resWin = await resolveWalletLendStep(
+      {
+        boxId: winBox.boxId,
+        maturity: BigInt(HEIGHT + 21_600),
+        label: "win",
+        expectedCostRaw: 2n * ERG
+      },
+      h.deps
+    );
+    assert.equal(resWin.type, "fillOrder");
+    if (resWin.type === "fillOrder") {
+      assert.equal(
+        resWin.maturity,
+        BigInt(HEIGHT + 21_600),
+        "Finding #1: resolveWalletLendStep must preserve window maturity"
+      );
+    }
+
+    // --- Finding #3: Cancel lockout on token-heavy box + low-ERG auth box ---
+    const cancelH = createHarness();
+    const manyTokens: ChainAsset[] = Array.from({ length: 90 }, (_, i) => ({
+      tokenId: (0x1000 + i).toString(16).padStart(64, "0"),
+      amount: 100n
+    }));
+    // Protocol lot box holding 90 tokens (~3,100 B -> minBoxValue > 1.1M nanoERG) with 0.0011 ERG
+    // Previously `totalErg = 1.1M >= MIN_BOX` passed assembleCancelTx's naive MIN_BOX check
+    // and crashed assertTxInvariants with ZcTxInvariantError!
+    const tokenHeavyLot = makeChainBox({
+      id: hexId(0xc1),
+      ergoTree: getZcScript("LotAuction", "ERG").ergoTreeHex,
+      value: 1_100_000n,
+      assets: manyTokens,
+      additionalRegisters: registersFromList([
+        encodeHexBytes(HASH_A),
+        encodeLongs([5n * ERG, 2n * ERG, BigInt(HEIGHT), BigInt(HEIGHT + 720), BigInt(HEIGHT + 2160), 2_000_000n])
+      ])
+    });
+    cancelH.registerRecord(tokenHeavyLot);
+    // Creator address ADDR_A ONLY holds a 0.001 ERG token box; ERG lives at ADDR_B!
+    cancelH.walletUtxos.push(
+      makeChainBox({
+        id: hexId(0xc2),
+        ergoTree: TREE_A,
+        value: MIN_BOX,
+        assets: [{ tokenId: hexId(0xbc), amount: 1n }]
+      }),
+      makeChainBox({
+        id: hexId(0xc3),
+        ergoTree: TREE_B,
+        value: 2n * ERG
+      })
+    );
+    const cancelQuote = await quoteZcAction({ type: "cancel", boxId: tokenHeavyLot.boxId }, cancelH.deps);
+    assert.equal(cancelQuote.refusals.length, 0, `Finding #3: cancel quote failed: ${cancelQuote.refusals.join("; ")}`);
+    const cancelBuilt = await buildZcAction({ type: "cancel", boxId: tokenHeavyLot.boxId }, cancelH.deps);
+    assert.equal(cancelBuilt.unsignedTx.inputs.length, 3, "Finding #3: cancel must pull extra funding input");
+    assert.equal(cancelBuilt.signers[0], null);
+    assert.equal(cancelBuilt.signers[1], ADDR_A);
+    assert.equal(cancelBuilt.signers[2], ADDR_B);
+    assert.equal(cancelBuilt.unsignedTx.outputs.length, 2);
+
+    // Also verify selectAuthBox prefers clean/sufficient ERG box when available
+    const dustTokenBox = makeChainBox({
+      id: hexId(0xc4),
+      ergoTree: TREE_A,
+      value: MIN_BOX,
+      assets: [{ tokenId: hexId(0xbd), amount: 1n }]
+    });
+    const cleanErgBox = makeChainBox({
+      id: hexId(0xc5),
+      ergoTree: TREE_A,
+      value: 5_000_000n
+    });
+    const pickedAuth = selectAuthBox([dustTokenBox, cleanErgBox], TREE_A, {
+      preferClean: true,
+      minValue: 2_000_000n
+    });
+    assert.equal(pickedAuth?.boxId, cleanErgBox.boxId, "Finding #3: selectAuthBox should prefer clean sufficient ERG box");
+
+    // --- Finding #4: SigUSD slippage limits enforce maxErgPay ---
+    const sigOfferAct: ZcTxAction = {
+      type: "createOffer",
+      body: {
+        market: "SigUSD",
+        capital: "5000",
+        minYieldBps: 700,
+        floorBps: 15_000,
+        curve: [{ blocks: 21_600, bps: 800 }]
+      }
+    };
+    const sigQuote = await quoteZcAction(sigOfferAct, h.deps);
+    assert.equal(sigQuote.refusals.length, 0, `SigUSD createOffer quote failed: ${sigQuote.refusals.join("; ")}`);
+    assert.equal(sigQuote.suggestedLimits.maxPay, 5000n, "Finding #4: SigUSD maxPay must be populated");
+    assert.ok(
+      sigQuote.suggestedLimits.maxErgPay !== undefined && sigQuote.suggestedLimits.maxErgPay > 0n,
+      "Finding #4: SigUSD maxErgPay must be populated"
+    );
+    // Building with exact suggestedLimits succeeds
+    const sigBuilt = await buildZcAction(sigOfferAct, h.deps, sigQuote.suggestedLimits);
+    assert.ok(sigBuilt.unsignedTx.outputs.length >= 2);
+    // Tightening ONLY maxErgPay by 1 nanoERG must trigger ZcTxConflictError
+    let threwErgLimit = false;
+    try {
+      await buildZcAction(sigOfferAct, h.deps, {
+        ...sigQuote.suggestedLimits,
+        maxErgPay: sigQuote.suggestedLimits.maxErgPay! - 1n
+      });
+    } catch (err) {
+      threwErgLimit = err instanceof ZcTxConflictError;
+    }
+    assert.ok(threwErgLimit, "Finding #4: exceeding maxErgPay on SigUSD tx must throw ZcTxConflictError");
+
+    // --- Finding #5: Unverified wrap receipt must NOT show verified status ---
+    const unverifiedReceipt = verifyToken({
+      id: hexId(0xd1),
+      ticker: "ZCS-Wrap-Fake",
+      decimals: 0,
+      amount: 1,
+      kind: "receipt",
+      verified: false,
+      wraps: {
+        id: ZC_SIGUSD_TOKEN_ID,
+        ticker: "SigUSD",
+        name: "SigUSD",
+        description: null,
+        decimals: 2,
+        amount: 100,
+        rawAmount: "10000",
+        kind: "token",
+        bondId: null,
+        vaultBoxId: null,
+        refreshFrom: null,
+        state: "wrapped"
+      }
+    });
+    assert.equal(
+      unverifiedReceipt.status,
+      "unverified",
+      "Finding #5: unverified wrap receipt must have status=unverified"
+    );
+    assert.equal(unverifiedReceipt.badge, "Custody unverified");
+
+    const verifiedReceipt = verifyToken({
+      id: hexId(0xd2),
+      ticker: "ZCS-Wrap-Real",
+      decimals: 0,
+      amount: 1,
+      kind: "receipt",
+      verified: true,
+      wraps: {
+        id: ZC_SIGUSD_TOKEN_ID,
+        ticker: "SigUSD",
+        name: "SigUSD",
+        description: null,
+        decimals: 2,
+        amount: 100,
+        rawAmount: "10000",
+        kind: "token",
+        bondId: null,
+        vaultBoxId: null,
+        refreshFrom: null,
+        state: "wrapped"
+      }
+    });
+    assert.equal(verifiedReceipt.status, "verified");
+    assert.equal(verifiedReceipt.badge, "Custody + Asset Verified");
+
+    // --- Finding #6: Spectrum pool selection picks deepest ERG pool & rejects non-ERG/thin pools ---
+    const unverifiedTok = hexId(0xd3);
+    const poolThin = {
+      id: "pool-thin",
+      baseId: SPECTRUM_ERG_TOKEN_ID,
+      baseSymbol: "ERG",
+      quoteId: ZC_SIGUSD_TOKEN_ID,
+      quoteSymbol: "SigUSD",
+      lastPrice: 0.01, // fake 100 ERG per SigUSD
+      baseVolume: { value: 5 },
+      quoteVolume: { value: 1 }
+    };
+    const poolDeep = {
+      id: "pool-deep",
+      baseId: SPECTRUM_ERG_TOKEN_ID,
+      baseSymbol: "ERG",
+      quoteId: ZC_SIGUSD_TOKEN_ID,
+      quoteSymbol: "SigUSD",
+      lastPrice: 1.5, // real ~0.6667 ERG per SigUSD
+      baseVolume: { value: 50_000 },
+      quoteVolume: { value: 75_000 }
+    };
+    const poolNonErg = {
+      id: "pool-non-erg",
+      baseId: hexId(0xd9),
+      baseSymbol: "FAKE",
+      quoteId: ZC_SIGUSD_TOKEN_ID,
+      quoteSymbol: "SigUSD",
+      lastPrice: 0.0001,
+      baseVolume: { value: 999_999 },
+      quoteVolume: { value: 999_999 }
+    };
+    const poolUnverifiedThin = {
+      id: "pool-unv-thin",
+      baseId: SPECTRUM_ERG_TOKEN_ID,
+      baseSymbol: "ERG",
+      quoteId: unverifiedTok,
+      quoteSymbol: "SCAM",
+      lastPrice: 0.001,
+      baseVolume: { value: 100_000 },
+      quoteVolume: { value: 100 }
+    };
+    const poolZeroPrice = {
+      id: "pool-zero",
+      baseId: SPECTRUM_ERG_TOKEN_ID,
+      baseSymbol: "ERG",
+      quoteId: unverifiedTok,
+      quoteSymbol: "SCAM",
+      lastPrice: 0,
+      baseVolume: { value: 100_000 },
+      quoteVolume: { value: 100 }
+    };
+    const stats = [
+      {
+        id: "pool-thin",
+        lockedX: { id: SPECTRUM_ERG_TOKEN_ID, amount: 10, ticker: "ERG", decimals: 9 },
+        lockedY: { id: ZC_SIGUSD_TOKEN_ID, amount: 10, ticker: "SigUSD", decimals: 2 },
+        tvl: { value: 20 }
+      },
+      {
+        id: "pool-deep",
+        lockedX: { id: SPECTRUM_ERG_TOKEN_ID, amount: 100_000, ticker: "ERG", decimals: 9 },
+        lockedY: { id: ZC_SIGUSD_TOKEN_ID, amount: 150_000, ticker: "SigUSD", decimals: 2 },
+        tvl: { value: 250_000 }
+      },
+      {
+        id: "pool-unv-thin",
+        lockedX: { id: SPECTRUM_ERG_TOKEN_ID, amount: 100, ticker: "ERG", decimals: 9 },
+        lockedY: { id: unverifiedTok, amount: 100, ticker: "SCAM", decimals: 0 },
+        tvl: { value: 500 } // below MIN_USD_LIQUIDITY (10,000)
+      }
+    ];
+
+    // Check BOTH array orderings ([thin, deep, nonErg] AND [deep, thin, nonErg])
+    const r1 = selectSpectrumTokenRates([poolThin, poolDeep, poolNonErg, poolUnverifiedThin, poolZeroPrice], stats);
+    const r2 = selectSpectrumTokenRates([poolDeep, poolThin, poolNonErg, poolUnverifiedThin, poolZeroPrice], stats);
+    assert.ok(r1.has(ZC_SIGUSD_TOKEN_ID) && r2.has(ZC_SIGUSD_TOKEN_ID));
+    assert.equal(
+      r1.get(ZC_SIGUSD_TOKEN_ID)!.toFixed(6),
+      (1 / 1.5).toFixed(6),
+      "Finding #6: deepest ERG pool must win when listed second"
+    );
+    assert.equal(
+      r2.get(ZC_SIGUSD_TOKEN_ID)!.toFixed(6),
+      (1 / 1.5).toFixed(6),
+      "Finding #6: deepest ERG pool must win when listed first"
+    );
+    assert.ok(
+      !r1.has(unverifiedTok),
+      "Finding #6: unverified token below MIN_USD_LIQUIDITY must be excluded"
+    );
+    // Non-ERG pool alone for verified token must also be excluded
+    const rNonErgOnly = selectSpectrumTokenRates([poolNonErg], stats);
+    assert.ok(
+      !rNonErgOnly.has(ZC_SIGUSD_TOKEN_ID),
+      "Finding #6: non-ERG base pool for verified token must be rejected"
     );
   });
 

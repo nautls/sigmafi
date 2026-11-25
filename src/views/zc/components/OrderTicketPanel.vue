@@ -212,7 +212,8 @@ watch(
     () => props.filters.coverage,
     side,
     amount,
-    termDays
+    termDays,
+    effectiveAprBps
   ],
   () => {
     if (simTimer !== null) window.clearTimeout(simTimer);
@@ -227,7 +228,8 @@ watch(
       market: props.market,
       amount: amount.value,
       to: T.value,
-      coverage: props.filters.coverage
+      coverage: props.filters.coverage,
+      minYieldBps: effectiveAprBps.value
     });
     if (!draft) {
       simRes.value = null;
@@ -270,7 +272,7 @@ const lendSimSummary = computed(() => {
           0
         ) / spent
       : null;
-  return { count: matches.length, spent, face, interest: Math.max(0, face - spent), avgBps };
+  return { count: matches.length, spent, face, interest: face - spent, avgBps };
 });
 
 // Borrow calculations
@@ -442,6 +444,7 @@ function openPreview() {
             steps: (simRes.value?.matches || []).map((mt, idx) => ({
               boxId: mt.counterpartyId,
               units: mt.units ? BigInt(mt.units) : null,
+              maturity: mt.maturity != null ? BigInt(mt.maturity) : null,
               label: `Fill #${idx + 1} (${mt.counterpartyId.slice(0, 8)}…)`,
               expectedCostRaw: mt.cost ? BigInt(mt.cost) : 0n
             }))

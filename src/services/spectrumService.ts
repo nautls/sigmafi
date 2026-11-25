@@ -1,4 +1,4 @@
-import { get } from "@/utils";
+import { get } from "@/utils/fetchUtils";
 
 export type SpectrumPool = {
   id: string;

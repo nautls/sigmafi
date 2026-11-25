@@ -6,6 +6,7 @@ import AskInspector from "./components/AskInspector.vue";
 import ExecutionPreviewModal, {
   ExecutionPreviewPayload
 } from "./components/ExecutionPreviewModal.vue";
+import MarketQuickFillModal from "./components/MarketQuickFillModal.vue";
 import OfferInspector from "./components/OfferInspector.vue";
 import OrderLadderPanel from "./components/OrderLadderPanel.vue";
 import OrderLedgerTable from "./components/OrderLedgerTable.vue";
@@ -110,6 +111,7 @@ const lookupAsk = ref<ZcAskSummary | null>(null);
 const lookupOffer = ref<ZcOfferSummary | null>(null);
 
 const previewPayload = ref<ExecutionPreviewPayload | null>(null);
+const quickFillAsk = ref<ZcAskSummary | null>(null);
 
 const ticketPrefill = ref<{
   seq: number;
@@ -553,6 +555,13 @@ function selectBid(id: string) {
 }
 
 function handleQuickFund(ask: ZcAskSummary) {
+  const isWindow = ask.pricing === "window" && !!ask.window;
+  const isPartialShares = ask.kind === "shares" && ask.units > (ask.minFill || 1);
+  if (isWindow || isPartialShares) {
+    quickFillAsk.value = ask;
+    return;
+  }
+
   const q = resolvedAskQuote(ask, zc.height);
   if (!q) {
     selected.value = { type: "ask", id: ask.id };
@@ -605,7 +614,11 @@ function handleQuickFund(ask: ZcAskSummary) {
     },
     txAction:
       ask.kind === "order"
-        ? { type: "fillOrder", boxId: ask.id }
+        ? {
+            type: "fillOrder",
+            boxId: ask.id,
+            maturity: ask.pricing === "window" ? BigInt(q.maturity) : null
+          }
         : {
             type: "buyAsk",
             boxId: ask.id,
@@ -1169,6 +1182,21 @@ const pulse = computed(() => {
         </transition>
       </div>
     </div>
+
+    <!-- Quick Fill Config Modal (Variable Maturity & Partial Shares) -->
+    <transition name="sf-modal">
+      <market-quick-fill-modal
+        v-if="quickFillAsk"
+        :ask="quickFillAsk"
+        :height="zc.height"
+        :unit="zc.durationUnit"
+        @close="quickFillAsk = null"
+        @proceed="
+          quickFillAsk = null;
+          previewPayload = $event;
+        "
+      />
+    </transition>
 
     <!-- Structured Execution Preview Modal -->
     <transition name="sf-modal">

@@ -1360,33 +1360,81 @@ export function assemblePostTx(params: {
 
 /**
  * Assembles a creator-authorized cancellation transaction (`cancel`):
- * `IN(0) = protocol box`, `IN(1) = creator auth box` -> `OUT(0) = sweep` to creator, `OUT(1) = fee`.
+ * `IN(0) = protocol box`, `IN(1) = creator auth box`, `IN(2..) = optional wallet ERG top-up`
+ * -> `OUT(0) = sweep` to creator, `OUT(1) = fee`.
  */
 export function assembleCancelTx(params: {
   readonly box: ChainBox;
   readonly authBox: ChainBox;
   readonly refundTreeHex: string;
   readonly walletBook: WalletAddressBook;
+  readonly walletUtxos?: readonly ChainBox[];
   readonly height: number;
   readonly quote: ZcTxQuote;
 }): ZcBuiltTx {
-  const { box, authBox, refundTreeHex, walletBook, height, quote } = params;
-  const totalErg = box.value + authBox.value - TX_FEE;
-  if (totalErg < MIN_BOX) {
-    throw new ZcTxRefusalError("Combined box and authorization box values do not cover the miner fee.");
+  const {
+    box,
+    authBox,
+    refundTreeHex,
+    walletBook,
+    walletUtxos = [],
+    height,
+    quote
+  } = params;
+  const refundTree = refundTreeHex.toLowerCase();
+  const chosenBoxes: ChainBox[] = [box, authBox];
+  const excludeBoxIds = new Set<string>([box.boxId.toLowerCase(), authBox.boxId.toLowerCase()]);
+
+  const calcRefund = () => {
+    const mergedAssets = mergeTokens(chosenBoxes.flatMap((b) => b.assets));
+    const totalErg = chosenBoxes.reduce((acc, b) => acc + b.value, 0n) - TX_FEE;
+    const minReq = minBoxValue({
+      ergoTree: refundTree,
+      value: MIN_BOX,
+      creationHeight: height,
+      assets: mergedAssets,
+      additionalRegisters: {}
+    });
+    return { mergedAssets, totalErg, minReq };
+  };
+
+  let state = calcRefund();
+
+  // Pull additional wallet ERG if box + authBox do not cover TX_FEE + dynamic minBoxValue
+  // (e.g., when cancelling a multi-token collateral order or lot with a 0.001 ERG auth UTXO).
+  for (let pass = 0; pass < 3 && state.totalErg < state.minReq; pass++) {
+    if (walletUtxos.length === 0) break;
+    const neededErg = state.minReq - state.totalErg;
+    let extra: ChainBox[];
+    try {
+      extra = selectWalletFunding(walletUtxos, neededErg, [], {
+        excludeBoxIds,
+        walletBook
+      });
+    } catch {
+      break;
+    }
+    if (extra.length === 0) break;
+    for (const u of extra) {
+      excludeBoxIds.add(u.boxId.toLowerCase());
+      chosenBoxes.push(u);
+    }
+    state = calcRefund();
   }
 
-  const mergedAssets = mergeTokens([...box.assets, ...authBox.assets]);
-  const inputs: EIP12UnsignedInput[] = [
-    chainBoxToUnsignedInput(box),
-    chainBoxToUnsignedInput(authBox)
-  ];
+  if (state.totalErg < state.minReq) {
+    throw new ZcTxRefusalError(
+      `Insufficient wallet ERG to cover miner fee and minimum box value (${state.minReq.toString()} nanoERG required for ${state.mergedAssets.length} refunded tokens).`
+    );
+  }
+
+  const inputs: EIP12UnsignedInput[] = chosenBoxes.map((b) => chainBoxToUnsignedInput(b));
   const outputs: BoxCandidate<string>[] = [
     {
-      ergoTree: refundTreeHex.toLowerCase(),
+      ergoTree: refundTree,
       creationHeight: height,
-      value: totalErg.toString(),
-      assets: mergedAssets.map((a) => ({ tokenId: a.tokenId, amount: a.amount.toString() })),
+      value: state.totalErg.toString(),
+      assets: state.mergedAssets.map((a) => ({ tokenId: a.tokenId, amount: a.amount.toString() })),
       additionalRegisters: {}
     },
     minerFeeCandidate(TX_FEE, height)

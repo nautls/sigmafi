@@ -221,7 +221,8 @@ export const useChainStore = defineStore("chain", () => {
   }
 
   async function loadPriceRates() {
-    const tokens = await assetPricingService.getTokenRates();
+    const oracleFallback = zcGraphqlEngine.getOracleUsdPrice() ?? undefined;
+    const tokens = await assetPricingService.getTokenRates(oracleFallback);
     _priceRates.value = tokens;
 
     localStorage.setItem("prices", JSON.stringify(tokens));

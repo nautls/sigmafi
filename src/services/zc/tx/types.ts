@@ -32,11 +32,14 @@ export interface NautilusSignOptions {
 
 /**
  * Slippage / quote-drift protection checked immediately before signing.
- * Units: nanoERG for ERG / no-market actions (miner fee included); raw units (cents) for SigUSD.
+ * - `maxPay` / `minReceive`: primary market asset (nanoERG for ERG / no-market actions; raw units for SigUSD).
+ * - `maxErgPay` / `minErgReceive`: secondary nanoERG bounds enforced on non-ERG (e.g. SigUSD) market transactions.
  */
 export interface ZcTxLimits {
   readonly maxPay?: bigint;
   readonly minReceive?: bigint;
+  readonly maxErgPay?: bigint;
+  readonly minErgReceive?: bigint;
 }
 
 export interface ZcTxFeeItem {
@@ -148,6 +151,7 @@ export type ZcTxAction =
 export interface ZcWalletLendBatchStep {
   readonly boxId: string;
   readonly units?: bigint | null;
+  readonly maturity?: bigint | null;
   readonly label: string;
   readonly expectedCostRaw: bigint;
 }

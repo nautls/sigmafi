@@ -12,7 +12,7 @@ import { computed, onBeforeUnmount, ref } from "vue";
 import ZcOrderMark from "./ZcOrderMark.vue";
 import AssetIcon from "@/components/AssetIcon.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
-import { verifyToken, verifyWrappedAsset } from "@/services/zc/tokenVerification";
+import { verifyToken } from "@/services/zc/tokenVerification";
 import { ZcCollateralToken, ZcWalletToken } from "@/types/zc";
 import { shortenString } from "@/utils";
 import { dateAtHeight, formatNumber, SHARES_UNITS, SIGUSD_TOKEN_ID } from "@/utils/zcMath";
@@ -44,9 +44,6 @@ const bondRouteId = computed(() => props.token.bondId || props.token.id);
 const hasPopover = computed(() => isReceipt.value || isProvision.value);
 
 const verification = computed(() => verifyToken(props.token));
-const innerVerification = computed(() =>
-  props.token.wraps ? verifyWrappedAsset(props.token.wraps) : verification.value
-);
 
 const iconSize = computed(() => {
   if (props.variant === "card") return 22;
@@ -359,12 +356,12 @@ onBeforeUnmount(() => {
               <span
                 class="sf-mono rounded px-1.5 py-0.5 text-[9px] font-bold uppercase"
                 :class="
-                  innerVerification.status === 'verified'
+                  verification.status === 'verified'
                     ? 'bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
                     : 'bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ask)]'
                 "
               >
-                {{ innerVerification.badge }}
+                {{ verification.badge }}
               </span>
             </div>
             <div class="mt-1.5 text-[13px] font-bold leading-snug text-[color:var(--sf-ink)]">
@@ -442,23 +439,46 @@ onBeforeUnmount(() => {
         <div
           class="mt-2.5 flex items-start gap-2 rounded-xl border px-2.5 py-2 text-[10.5px] leading-snug"
           :class="
-            innerVerification.status === 'verified'
+            verification.status === 'verified'
               ? 'border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)] text-[color:var(--sf-bid)]'
               : 'border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] text-[color:var(--sf-ink)]'
           "
         >
           <check-circle-icon
-            v-if="innerVerification.status === 'verified'"
+            v-if="verification.status === 'verified'"
             class="mt-0.5 h-3.5 w-3.5 shrink-0 text-[color:var(--sf-bid)]"
           />
           <alert-triangle-icon
             v-else
             class="mt-0.5 h-3.5 w-3.5 shrink-0 text-[color:var(--sf-ask)]"
           />
-          <div class="min-w-0">
+          <div class="min-w-0 space-y-1">
             <div class="font-semibold">
-              {{ verification.note || innerVerification.note || innerVerification.summary }}
+              {{ verification.note || verification.summary }}
             </div>
+            <ul
+              v-if="verification.checks && verification.checks.length > 0"
+              class="sf-mono space-y-0.5 text-[9.5px] text-[color:var(--sf-ink-2)]"
+            >
+              <li
+                v-for="chk in verification.checks"
+                :key="chk.label"
+                class="flex items-start gap-1.5"
+              >
+                <span
+                  :class="
+                    chk.ok === true
+                      ? 'text-[color:var(--sf-bid)]'
+                      : chk.ok === false
+                        ? 'text-[color:var(--sf-ask)]'
+                        : 'text-[color:var(--sf-muted)]'
+                  "
+                >
+                  {{ chk.ok === true ? "✓" : chk.ok === false ? "✗" : "•" }}
+                </span>
+                <span>{{ chk.label }}: {{ chk.detail }}</span>
+              </li>
+            </ul>
           </div>
         </div>
 

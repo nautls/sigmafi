@@ -353,6 +353,7 @@ const lendPlan = computed(() => {
       label: kindLabel(kind),
       units: a?.units ?? Number(mt.units || 1),
       rawUnits: mt.units ? BigInt(mt.units) : null,
+      maturity: mt.maturity ?? null,
       expectedCostRaw: mt.cost ? BigInt(mt.cost) : 0n,
       cost,
       face,
@@ -366,7 +367,7 @@ const lendPlan = computed(() => {
       ? fromMarket(lendSim.value.filled, m) ?? 0
       : take.reduce((acc, x) => acc + x.cost, 0);
   const totalFace = take.reduce((acc, x) => acc + x.face, 0);
-  const interest = Math.max(0, totalFace - spent);
+  const interest = totalFace - spent;
   const avgBps =
     spent > 0 ? take.reduce((acc, x) => acc + x.cost * (x.yieldBps ?? 0), 0) / spent : null;
   const bestBps = sideBook.value?.bestAsk ?? sideAsks.value[0]?.quote?.yieldBps ?? null;
@@ -725,6 +726,7 @@ function openLendNowPreview() {
       steps: p.take.map((it, idx) => ({
         boxId: it.id,
         units: it.kind === "shares" ? it.rawUnits ?? BigInt(it.units) : null,
+        maturity: it.maturity != null ? BigInt(it.maturity) : null,
         label: `Fill #${idx + 1} (${shortenString(it.id, 10)})`,
         expectedCostRaw: it.expectedCostRaw
       }))

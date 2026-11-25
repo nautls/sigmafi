@@ -283,38 +283,48 @@ export function assertTxInvariants(exp: TxInvariantExpectation): void {
   }
 
   // 7. Quote-drift / slippage guard (`limits`) computed directly from the final tx
-  if (limits && (limits.maxPay !== undefined || limits.minReceive !== undefined)) {
+  if (
+    limits &&
+    (limits.maxPay !== undefined ||
+      limits.minReceive !== undefined ||
+      limits.maxErgPay !== undefined ||
+      limits.minErgReceive !== undefined)
+  ) {
     const mToken = market ? marketTokenId(market) : null;
-    let walletIn = 0n;
-    let walletOut = 0n;
+    let walletErgIn = 0n;
+    let walletErgOut = 0n;
+    let walletTokenIn = 0n;
+    let walletTokenOut = 0n;
 
     for (let i = 0; i < inputs.length; i++) {
       if (!walletBook.byTreeHex.has(inputs[i].ergoTree.toLowerCase())) continue;
-      if (mToken === null) {
-        walletIn += BigInt(inputs[i].value);
-      } else {
+      walletErgIn += BigInt(inputs[i].value);
+      if (mToken !== null) {
         for (const a of inputs[i].assets) {
-          if (a.tokenId.toLowerCase() === mToken) walletIn += BigInt(a.amount);
+          if (a.tokenId.toLowerCase() === mToken) walletTokenIn += BigInt(a.amount);
         }
       }
     }
     for (let i = 0; i < outputs.length; i++) {
       if (!walletBook.byTreeHex.has(outputs[i].ergoTree.toLowerCase())) continue;
-      if (mToken === null) {
-        walletOut += BigInt(outputs[i].value);
-      } else {
+      walletErgOut += BigInt(outputs[i].value);
+      if (mToken !== null) {
         for (const a of outputs[i].assets) {
-          if (a.tokenId.toLowerCase() === mToken) walletOut += BigInt(a.amount);
+          if (a.tokenId.toLowerCase() === mToken) walletTokenOut += BigInt(a.amount);
         }
       }
     }
 
     // Benign sub-MIN_BOX UTXO dust absorbed into miner fee (already bounded < MIN_BOX in step 3)
     // is excluded from quote-drift comparison so dust never causes false conflicts.
-    const dust = mToken === null ? feeVal - TX_FEE : 0n;
-    const netDelta = walletOut - walletIn + dust;
-    const actualPays = netDelta < 0n ? -netDelta : 0n;
-    const actualReceives = netDelta > 0n ? netDelta : 0n;
+    const ergDust = feeVal - TX_FEE;
+    const ergNetDelta = walletErgOut - walletErgIn + ergDust;
+    const actualErgPays = ergNetDelta < 0n ? -ergNetDelta : 0n;
+    const actualErgReceives = ergNetDelta > 0n ? ergNetDelta : 0n;
+
+    const primaryNetDelta = mToken === null ? ergNetDelta : walletTokenOut - walletTokenIn;
+    const actualPays = primaryNetDelta < 0n ? -primaryNetDelta : 0n;
+    const actualReceives = primaryNetDelta > 0n ? primaryNetDelta : 0n;
 
     if (limits.maxPay !== undefined && actualPays > limits.maxPay) {
       throw new ZcTxConflictError(
@@ -324,6 +334,16 @@ export function assertTxInvariants(exp: TxInvariantExpectation): void {
     if (limits.minReceive !== undefined && actualReceives < limits.minReceive) {
       throw new ZcTxConflictError(
         `Quote moved before signing: transaction now receives ${actualReceives.toString()}, below your limit of ${limits.minReceive.toString()}.`
+      );
+    }
+    if (limits.maxErgPay !== undefined && actualErgPays > limits.maxErgPay) {
+      throw new ZcTxConflictError(
+        `Quote moved before signing: transaction now spends ${actualErgPays.toString()} nanoERG, above your ERG limit of ${limits.maxErgPay.toString()}.`
+      );
+    }
+    if (limits.minErgReceive !== undefined && actualErgReceives < limits.minErgReceive) {
+      throw new ZcTxConflictError(
+        `Quote moved before signing: transaction now receives ${actualErgReceives.toString()} nanoERG, below your ERG limit of ${limits.minErgReceive.toString()}.`
       );
     }
   }

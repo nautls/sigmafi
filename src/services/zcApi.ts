@@ -505,7 +505,10 @@ function buildCollateralToken(
     kind,
     bondId,
     wraps,
-    verified: kind === "receipt" || kind === "bond" || kind === "shares" || !!meta?.verified || !!knownMeta
+    verified:
+      meta?.verified !== undefined
+        ? !!meta.verified || !!knownMeta
+        : kind === "bond" || kind === "shares" || !!knownMeta
   };
 }
 
@@ -961,12 +964,14 @@ export function buildWalletLendDraft(params: {
   amount: number;
   to: number;
   coverage: number;
+  minYieldBps?: number | null;
 }): {
   type: "walletLend";
   market: ZcMarket;
   amount: string;
   to: number;
   coverage: number;
+  minYieldBps?: number;
 } | null {
   const raw = toMarket(params.amount, params.market, "floor");
   if (!raw || BigInt(raw) <= 0n) return null;
@@ -975,7 +980,10 @@ export function buildWalletLendDraft(params: {
     market: params.market,
     amount: raw,
     to: Math.round(params.to),
-    coverage: Math.round(params.coverage * 100)
+    coverage: Math.round(params.coverage * 100),
+    ...(params.minYieldBps != null && Number.isFinite(params.minYieldBps)
+      ? { minYieldBps: Math.max(0, Math.round(params.minYieldBps)) }
+      : {})
   };
 }
 
@@ -1318,7 +1326,10 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
         pool: t.pool ?? null,
         liquidity: t.liquidity ?? null,
         fees: t.fees ?? null,
-        verified: isReceipt || !!meta?.verified || !!known,
+        verified:
+          meta?.verified !== undefined
+            ? !!meta.verified || !!known
+            : (isReceipt && t.kind === "wrapReceipt") || !!known,
         unverified: !isReceipt && !isProvision && !known && meta != null && !meta.verified
       });
     }

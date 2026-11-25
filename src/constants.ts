@@ -1,6 +1,6 @@
 import { Network } from "@fleet-sdk/common";
 import { RECOMMENDED_MIN_FEE_VALUE } from "@fleet-sdk/core";
-import { getNetworkType } from "./utils";
+import { getNetworkType } from "./utils/otherUtils";
 
 export const ERG_TOKEN_ID = "ERG";
 export const MIN_FEE = RECOMMENDED_MIN_FEE_VALUE * 2n;

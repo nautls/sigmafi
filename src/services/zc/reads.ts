@@ -490,6 +490,14 @@ export class ZcGraphqlEngine {
     this.walletProvider = provider;
   }
 
+  /** Returns the latest on-chain ERG/USD oracle price if a snapshot is hydrated. */
+  getOracleUsdPrice(): number | null {
+    const or = this.snapshot?.book.confirmedOracle ?? this.snapshot?.book.oracle ?? null;
+    if (!or) return null;
+    const price = Number(usdPerErg(or.price));
+    return Number.isFinite(price) && price > 0 ? price : null;
+  }
+
   private emitSnapshotChange(): void {
     for (const listener of this.snapshotListeners) {
       try {

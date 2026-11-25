@@ -245,6 +245,16 @@ function computePostQuote(params: {
           .filter((a) => a.tokenId.toLowerCase() === mToken)
           .reduce((acc, a) => acc + a.amount, 0n);
 
+  const suggestedLimits: ZcTxLimits =
+    mToken === null
+      ? marketPay > 0n
+        ? { maxPay: marketPay }
+        : {}
+      : {
+          ...(marketPay > 0n ? { maxPay: marketPay } : {}),
+          ...(paysNanoErgs > 0n ? { maxErgPay: paysNanoErgs } : {})
+        };
+
   return {
     action,
     market,
@@ -267,7 +277,7 @@ function computePostQuote(params: {
     warnings,
     refusals: [],
     requires: [],
-    suggestedLimits: marketPay > 0n ? { maxPay: marketPay } : {}
+    suggestedLimits
   };
 }
 
@@ -364,11 +374,20 @@ function computeSpendQuote(params: {
   }
 
   const suggestedLimits: ZcTxLimits =
-    marketNet < 0n
-      ? { maxPay: -marketNet }
-      : marketNet > 0n
-        ? { minReceive: marketNet }
-        : {};
+    mToken === null
+      ? marketNet < 0n
+        ? { maxPay: -marketNet }
+        : marketNet > 0n
+          ? { minReceive: marketNet }
+          : {}
+      : {
+          ...(marketNet < 0n
+            ? { maxPay: -marketNet }
+            : marketNet > 0n
+              ? { minReceive: marketNet }
+              : {}),
+          ...(erg < 0n ? { maxErgPay: -erg } : erg > 0n ? { minErgReceive: erg } : {})
+        };
 
   return {
     action,
@@ -580,13 +599,18 @@ function requireCreatorAuth(
   walletBook: WalletAddressBook,
   walletUtxos: readonly ChainBox[],
   notOwnerMessage: string,
-  preferToken?: string
+  preferToken?: string,
+  opts?: { readonly preferClean?: boolean; readonly minValue?: bigint }
 ): { readonly ergoTreeHex: string; readonly address: string; readonly authBox: ChainBox } {
   const creator = walletBook.byTreeHash.get(creatorHash.toLowerCase());
   if (!creator) {
     throw new ZcTxRefusalError(notOwnerMessage);
   }
-  const authBox = selectAuthBox(walletUtxos, creator.ergoTreeHex, { preferToken });
+  const authBox = selectAuthBox(walletUtxos, creator.ergoTreeHex, {
+    preferToken,
+    preferClean: opts?.preferClean,
+    minValue: opts?.minValue
+  });
   if (!authBox) {
     throw new ZcTxRefusalError(
       `Your wallet holds no unspent box at the creator's address (${creator.address.slice(0, 10)}…), which this contract requires for authorization.`
@@ -1212,11 +1236,24 @@ async function planAction(
           throw new ZcTxRefusalError(`A ${record.script.kind} box cannot be cancelled.`);
       }
 
+      const creator = walletBook.byTreeHash.get(creatorHash.toLowerCase());
+      const baseCancelMinErg = creator
+        ? minBoxValue({
+            ergoTree: creator.ergoTreeHex,
+            value: MIN_BOX,
+            creationHeight: height,
+            assets: box.assets,
+            additionalRegisters: {}
+          })
+        : MIN_BOX;
+      const neededAuthErg = bigMax(0n, baseCancelMinErg + TX_FEE - box.value);
       const auth = requireCreatorAuth(
         creatorHash,
         walletBook,
         walletUtxos,
-        `Box ${id.slice(0, 10)}… was not created by the connected Nautilus wallet.`
+        `Box ${id.slice(0, 10)}… was not created by the connected Nautilus wallet.`,
+        undefined,
+        { preferClean: true, minValue: neededAuthErg }
       );
       const warnings = expired
         ? ["This box is past its expiry: anyone may refund it first and keep its expiry fee."]
@@ -1243,7 +1280,16 @@ async function planAction(
         suggestedLimits: {}
       };
 
-      if (mode === "quote") return { quote };
+      if (mode === "quote") {
+        // Verify wallet has enough total ERG to fund the cancel output + miner fee
+        const totalWalletErg = walletUtxos.reduce((acc, u) => acc + u.value, 0n);
+        if (box.value + totalWalletErg < baseCancelMinErg + TX_FEE) {
+          throw new ZcTxRefusalError(
+            "Insufficient wallet ERG to cover miner fee and minimum box value for refunded tokens."
+          );
+        }
+        return { quote };
+      }
       return {
         quote,
         build: () =>
@@ -1252,6 +1298,7 @@ async function planAction(
             authBox: auth.authBox,
             refundTreeHex: auth.ergoTreeHex,
             walletBook,
+            walletUtxos,
             height,
             quote
           })
@@ -2344,7 +2391,11 @@ export async function resolveWalletLendStep(
   const box = await readSingleBox(ctx, step.boxId, false);
   const rec = readZcBox(box);
   if (rec?.recordType === "order") {
-    return { type: "fillOrder", boxId: step.boxId };
+    return {
+      type: "fillOrder",
+      boxId: step.boxId,
+      maturity: isWindowOrder(rec) ? step.maturity ?? null : null
+    };
   }
   if (rec?.recordType === "ask") {
     return { type: "buyAsk", boxId: step.boxId, units: step.units ?? null };

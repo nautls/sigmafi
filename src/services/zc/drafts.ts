@@ -55,6 +55,7 @@ import {
   offerStateOf,
   orderMaturity,
   orderRefusal,
+  ownRatio,
   prospectBondTerms,
   resolvePrincipal,
   saleGuardRefusal,
@@ -181,9 +182,22 @@ function simulateWalletLend(
   const amount = needLong(d, "amount");
   const to = optLong(d, "to") ?? BLOCKS_PER_YEAR;
   const coverage = optLong(d, "coverage") ?? 15_000n;
+  const minYield = optLong(d, "minYieldBps");
   check(amount > 0n, "amount must be positive");
+  check(minYield === null || minYield >= 0n, "minYieldBps cannot be negative");
   const h = matcher.height;
   const oracle = matcher.book.oracle;
+
+  // Never auto-lend into oracle-rule bonds when no oracle price is available to verify collateral cover.
+  if (!oracle || !matcher.book.confirmedOracle) {
+    return {
+      outcome: "waiting",
+      matches: [],
+      filled: "0",
+      remaining: amount.toString(),
+      searched: 0
+    };
+  }
 
   interface BuyRow {
     id: string;
@@ -192,6 +206,7 @@ function simulateWalletLend(
     cost: bigint;
     repayment: bigint;
     mat: bigint;
+    yieldBps: bigint;
     rank: bigint;
   }
 
@@ -204,11 +219,18 @@ function simulateWalletLend(
       if (!pRes.ok) continue;
       const bond = prospectBondTerms(src.order, h, mRes.value, pRes.value);
       if (guardRefusal(src.order, bond, oracle, h) !== null) continue;
-      if (oracle && belowOwnRatio(bond, oracle.price)) continue;
-      if (mRes.value - (h + 1n) > to) continue;
+      if (belowOwnRatio(bond, oracle.price)) continue;
+      const blocksLeft = mRes.value - (h + 1n);
+      if (blocksLeft <= 0n || blocksLeft > to) continue;
+      const ratio = ownRatio(bond);
+      if (ratio === null || ratio < coverage) continue;
       const cov = json.coverBps(bond);
-      if (cov !== null && cov < coverage) continue;
+      if (cov === null || cov < coverage) continue;
       const face = src.order.repayment;
+      if (face <= pRes.value) continue;
+      const yb = yieldBps(face, pRes.value, blocksLeft);
+      if (yb === null || yb <= 0n) continue;
+      if (minYield !== null && yb < minYield) continue;
       buys.push({
         id: src.boxId,
         units: 1n,
@@ -216,18 +238,27 @@ function simulateWalletLend(
         cost: pRes.value,
         repayment: src.order.repayment,
         mat: mRes.value,
-        rank: rankYield(face, pRes.value, mRes.value - (h + 1n))
+        yieldBps: yb,
+        rank: rankYield(face, pRes.value, blocksLeft)
       });
     } else {
       const bond = bondTermsOf(src.bond.record);
       const pRes = askPrice(src.ask, src.ask.token.amount, bond, h);
       if (!pRes.ok) continue;
       if (saleGuardRefusal(src.ask, bond, oracle, h) !== null) continue;
-      if (oracle && belowOwnRatio(bond, oracle.price)) continue;
-      if (bond.maturity - (h + 1n) > to) continue;
+      if (belowOwnRatio(bond, oracle.price)) continue;
+      const blocksLeft = bond.maturity - (h + 1n);
+      if (blocksLeft <= 0n || blocksLeft > to) continue;
+      const ratio = ownRatio(bond);
+      if (ratio === null || ratio < coverage) continue;
       const cov = json.coverBps(bond);
-      if (cov !== null && cov < coverage) continue;
+      if (cov === null || cov < coverage) continue;
       const face = bond.repayment * src.ask.token.amount;
+      const paidWhole = pRes.value * src.whole;
+      if (face <= paidWhole) continue;
+      const yb = yieldBps(face, paidWhole, blocksLeft);
+      if (yb === null || yb <= 0n) continue;
+      if (minYield !== null && yb < minYield) continue;
       buys.push({
         id: src.boxId,
         units: src.ask.token.amount,
@@ -235,7 +266,8 @@ function simulateWalletLend(
         cost: pRes.value,
         repayment: bond.repayment,
         mat: bond.maturity,
-        rank: rankYield(face, pRes.value * src.whole, bond.maturity - (h + 1n))
+        yieldBps: yb,
+        rank: rankYield(face, paidWhole, blocksLeft)
       });
     }
   }
@@ -259,13 +291,12 @@ function simulateWalletLend(
     outcome: taken.length === 0 ? "waiting" : left === 0n ? "full" : "partial",
     matches: taken.map((row) => {
       const face = row.repayment * row.units;
-      const yb = yieldBps(face, row.cost * row.whole, row.mat - (h + 1n));
       return {
         counterpartyId: row.id,
         units: row.units.toString(),
         cost: row.cost.toString(),
         face: (face / row.whole).toString(),
-        yieldBps: yb !== null ? toSafeNum(yb) : 0,
+        yieldBps: toSafeNum(row.yieldBps),
         maturity: toSafeNum(row.mat)
       };
     }),
