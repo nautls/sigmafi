@@ -236,6 +236,7 @@ export interface ZcAskSummary {
   tp: ZcTwoPointYield | null;
   units: number;
   minFill: number;
+  shareCount?: number;
   collateral: ZcCollateral;
   bond: ZcBondSummary | null;
   cov: number | null;
@@ -497,6 +498,7 @@ export interface ZcPortfolioPosition {
     tokenId?: string;
     bondId?: string;
     type?: string;
+    shareCount?: string | number;
     minLot?: string | null;
     vault?: { boxId?: string; state?: number; pulled?: boolean; outstanding?: string } | null;
   } | null;

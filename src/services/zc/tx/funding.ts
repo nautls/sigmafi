@@ -278,11 +278,13 @@ export function selectWalletFunding(
 
 /**
  * zcs1 Script Disclosure (`var 64`):
- * If `namedTreeHex` does not already appear as the ErgoTree of any input or output,
+ * If `namedTreeHex` does not already appear as the ErgoTree of any output,
  * attaches `Coll[Coll[Byte]](namedTreeBytes)` to `INPUTS(0).extension[64]` so batchers
- * and counterparties can learn the party's script in one transaction lookup.
+ * and counterparties can learn the party's script from the transaction's outputs or
+ * extension alone (even while the tx is in the mempool where input boxes may not be
+ * present in `inputs` metadata).
  *
- * Mirrors `ZcUserTransactions.disclosed`.
+ * Mirrors `AppBase.disclose` / `ZcUserTransactions.disclosed`.
  */
 export function applyScriptDisclosure(
   inputs: readonly EIP12UnsignedInput[],
@@ -293,9 +295,7 @@ export function applyScriptDisclosure(
     throw new ZcTxRefusalError("Script disclosure requires at least one input.");
   }
   const target = namedTreeHex.trim().toLowerCase();
-  const alreadyPresent =
-    inputs.some((i) => i.ergoTree.toLowerCase() === target) ||
-    outputs.some((o) => o.ergoTree.toLowerCase() === target);
+  const alreadyPresent = outputs.some((o) => o.ergoTree.toLowerCase() === target);
 
   if (alreadyPresent) {
     return inputs.map((i) => ({ ...i, extension: { ...i.extension } }));

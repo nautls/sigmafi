@@ -63,13 +63,13 @@ function previewWrap(tok: ZcWalletToken) {
     badge: "Custody Wrap",
     tone: "cobalt",
     heroLabel: "Wrapping cost",
-    heroValue: "0.036 ERG",
-    heroSub: "Includes 0.03 ERG refundable reserve",
+    heroValue: "0.037 ERG",
+    heroSub: "0.038 ERG incl. miner fee · 0.03 ERG refundable reserve",
     rows: [
       { label: "Asset", value: tok.ticker },
       { label: "Token ID", value: shortenString(tok.id, 14) },
       { label: "Receipt minted", value: `ZCS-Wrap-${tok.id.slice(0, 6)}` },
-      { label: "Custody reserve", value: "0.03 ERG (returned on unwrap)" },
+      { label: "Custody reserve", value: "0.03 ERG (returned on unwrap; decreases if refreshed after 4+ yrs)" },
       { label: "Unwrap", value: "Any time by receipt holder", tone: "bid" }
     ],
     rawSummary: { action: "wrapNft", tokenId: tok.id },
@@ -290,10 +290,10 @@ function previewWrapAction(w: ZcPortfolioWrap, action: "mint" | "cancel" | "unwr
             Wrap deposit
           </div>
           <div class="sf-serif mt-0.5 text-[32px] font-semibold leading-none text-[color:var(--sf-ink)]">
-            0.036 ERG
+            0.037 ERG
           </div>
           <div class="sf-mono mt-1 text-[11.5px] text-[color:var(--sf-ink-2)]">
-            0.03 ERG reserve returned on unwrap
+            0.038 ERG incl. miner fee · 0.03 ERG reserve returned on unwrap (decreases if refreshed after 4+ yrs)
           </div>
         </div>
       </div>

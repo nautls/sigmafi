@@ -298,6 +298,14 @@ function openPreview() {
             <zc-dur-input v-model="heldDays" :unit="unit" of="days" tone="cobalt" />
           </div>
         </div>
+
+        <div
+          v-if="vault === 'dutch' && posMarket === 'SigUSD'"
+          class="mt-2.5 rounded-xl border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)] px-3 py-2 text-[11.5px] text-[color:var(--sf-ink-2)]"
+        >
+          <span class="font-semibold text-[color:var(--sf-ask)]">SigUSD Dutch note:</span>
+          On liquidation, the merged box's 0.001 ERG minimum triggers a dust auction that delays partial claims until the auction ends (final claim with 100% of shares stays open; Selective vault avoids this).
+        </div>
       </section>
 
       <!-- Default Recovery Schedule Chart -->

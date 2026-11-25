@@ -1,7 +1,11 @@
+import { hex } from "@fleet-sdk/crypto";
+import { SByte, SColl, SLong } from "@fleet-sdk/serializer";
 import {
   ChainAsset,
   LONG_MAX,
+  MAX_COLLATERAL_TOKENS,
   MIN_BOX,
+  minBoxValue,
   ZcAsk,
   ZcBond,
   ZcLot,
@@ -122,22 +126,27 @@ export function liqRuleKind(liqHash: string, market: ZcMarket): ZcRuleKind {
   return "other";
 }
 
-function anyOracleRule(liqHash: string): boolean {
-  return ZC_MARKETS.some((m) => liqHash === hashOf("OracleLiquidation", m));
+export function oracleRuleMarket(liqHash: string): ZcMarket | null {
+  return ZC_MARKETS.find((m) => liqHash === hashOf("OracleLiquidation", m)) ?? null;
 }
 
 export function ownRatio(b: ZcBondTerms): bigint | null {
-  return anyOracleRule(b.liqHash) && b.payload.length > 0 ? b.payload[0] : null;
+  return oracleRuleMarket(b.liqHash) !== null && b.payload.length > 0 ? b.payload[0] : null;
 }
 
 export function coverOfBond(b: ZcBondTerms, price: bigint): [bigint, bigint] | null {
   return coverOf(b.market, b.collateralErg, b.collateral, b.repayment, price);
 }
 
+export function ruleCoverOfBond(b: ZcBondTerms, price: bigint): [bigint, bigint] | null {
+  const m = oracleRuleMarket(b.liqHash) ?? b.market;
+  return coverOf(m, b.collateralErg, b.collateral, b.repayment, price);
+}
+
 export function belowOwnRatio(b: ZcBondTerms, price: bigint): boolean {
   const r = ownRatio(b);
   if (r === null) return false;
-  const c = coverOfBond(b, price);
+  const c = ruleCoverOfBond(b, price);
   return c !== null && c[0] * 10_000n < c[1] * r;
 }
 
@@ -259,7 +268,11 @@ export function resolvePrincipal(
   return right(best);
 }
 
-export function orderRefusal(o: ZcOrder, height: bigint): string | null {
+export function orderRefusal(
+  o: ZcOrder,
+  height: bigint,
+  chosen: bigint | null = null
+): string | null {
   if (isWindowOrder(o)) {
     if (!o.priced || !isCurveOrder(o)) {
       return "a window order not priced by CurveOrder_Pricing";
@@ -283,7 +296,7 @@ export function orderRefusal(o: ZcOrder, height: bigint): string | null {
     return "the priced order has malformed policy commitments";
   }
 
-  const mat = orderMaturity(o, height);
+  const mat = orderMaturity(o, height, chosen);
   if (!mat.ok) return mat.error;
   if (o.priced) {
     const p = orderPrincipal(o, height + QUOTE_BLOCKS, mat.value);
@@ -396,13 +409,15 @@ export function currencyHeld(v: ZcShareVault): bigint {
     .reduce((acc, t) => acc + t.amount, 0n);
 }
 
-export function lotTarget(v: ZcShareVault, at: bigint): bigint {
+export function lotTarget(v: ZcShareVault, at: bigint): bigint | null {
   const [repayment, opening, floor, length, , , began] = v.auction;
   if (length < 1n || repayment <= 0n) return 0n;
   const since = bigMin(bigMax(at - began, 0n), length);
   const num = repayment * (opening * length - (opening - floor) * since);
   const den = 10_000n * length;
-  return bigMin(bigMax((num + den - 1n) / den, 0n), LONG_MAX);
+  const target = (num + den - 1n) / den;
+  if (target < 0n || !isValidLong(target)) return null;
+  return target;
 }
 
 export function excessPrice(v: ZcShareVault, at: bigint): bigint | null {
@@ -436,11 +451,21 @@ export function saleKeepsErg(v: ZcShareVault): boolean {
   );
 }
 
-/** The most of the repayment the bond's own collateral can pay: nanoERG above MIN_BOX, or repayment token held. */
-export function repayableFromCollateral(bond: ZcBond): bigint {
+/**
+ * The most of the repayment the bond's own collateral can pay: nanoERG above the return box's
+ * consensus minimum value, or repayment token held.
+ */
+export function repayableFromCollateral(bond: ZcBond, borrowerTree?: string): bigint {
   const mToken = marketTokenId(bond.market);
   if (mToken === null) {
-    return bigMax(0n, bigMin(bond.repayment, bond.collateralErg - MIN_BOX));
+    const returnTree = borrowerTree ?? `0008cd${"02"}${"00".repeat(32)}`;
+    const minReturnErg = minBoxValue({
+      ergoTree: returnTree,
+      value: MIN_BOX,
+      assets: bond.collateral,
+      additionalRegisters: { R4: SColl(SByte, new Uint8Array(32)).toHex() }
+    });
+    return bigMax(0n, bigMin(bond.repayment, bond.collateralErg - minReturnErg));
   }
   const held = bond.collateral
     .filter((t) => t.tokenId === mToken)
@@ -613,16 +638,84 @@ export function deliveryValid(o: ZcOffer): boolean {
   const isFrac = o.mintHashHex === getZcScript("FractionalMint", null).treeHash;
   const isDutch = o.mintHashHex === getZcScript("DutchAuctionMint", o.market).treeHash;
   const needed = isDutch ? 8 : 3;
-  return (
-    (isFrac || isDutch) &&
-    o.fractional.length === needed &&
-    o.metadata.length === 3 &&
-    o.fractional[0] >= 1n &&
-    o.fractional[0] <= 1_000_000_000n &&
-    o.fractional[1] >= MIN_BATCHING_FEE &&
-    o.fractional[2] >= MIN_BATCHING_FEE &&
-    isValidLong(deliveryErgBig(o, false))
-  );
+  if (
+    !(isFrac || isDutch) ||
+    o.fractional.length !== needed ||
+    o.metadata.length !== 3 ||
+    o.fractional[0] < 1n ||
+    o.fractional[0] > 1_000_000_000n ||
+    o.fractional[1] < MIN_BATCHING_FEE ||
+    o.fractional[2] < MIN_BATCHING_FEE ||
+    !isValidLong(deliveryErgBig(o, false))
+  ) {
+    return false;
+  }
+  if (isDutch) {
+    const [, , , opening, floor, length, expiry, threshold] = o.fractional;
+    if (
+      floor < 0n ||
+      floor > opening ||
+      opening > 1_000_000n ||
+      length < 1n ||
+      length > 1_000_000n ||
+      expiry < length ||
+      expiry > 1_000_000n ||
+      threshold < 0n
+    ) {
+      return false;
+    }
+  }
+  return true;
+}
+
+const DUMMY_CONTINUATION_R6 = SColl(SByte, new Uint8Array(64)).toHex();
+
+/**
+ * Projects a `LendOffer`'s post-first-fill registers where `R6` grows from 32 bytes
+ * (`policyHash`) to 64 bytes (`policyHash || predecessorBoxId`).
+ */
+export function offerContinuationRegisters(o: ZcOffer): Record<string, string> {
+  const regs = o.box.additionalRegisters;
+  if (regs.R4 && regs.R5) {
+    const out: Record<string, string> = {};
+    for (const k of ["R4", "R5", "R6", "R7", "R8", "R9"] as const) {
+      const v = regs[k];
+      if (typeof v === "string" && v.length > 0) out[k] = v;
+    }
+    out.R6 = DUMMY_CONTINUATION_R6;
+    return out;
+  }
+  const ownerBytes =
+    o.ownerHash.length === 64 ? hex.decode(o.ownerHash) : new Uint8Array(32);
+  const mintBytes =
+    o.mintHashHex.length > 0 && o.mintHashHex.length % 2 === 0
+      ? hex.decode(o.mintHashHex)
+      : new Uint8Array(0);
+  return {
+    R4: SColl(SByte, ownerBytes).toHex(),
+    R5: SColl(SLong, [...o.terms]).toHex(),
+    R6: DUMMY_CONTINUATION_R6,
+    R7: SColl(SLong, [...o.fractional]).toHex(),
+    R8: SColl(SColl(SByte), [...o.metadata]).toHex(),
+    R9: SColl(SByte, mintBytes).toHex()
+  };
+}
+
+/**
+ * Consensus minimum ERG (`max(MIN_BOX, serializedBytes * 360)`) required by `o`'s
+ * post-fill continuation box when `remainingCapital` market tokens remain in it.
+ */
+export function minContinuationErg(o: ZcOffer, remainingCapital = o.capital): bigint {
+  const mToken = marketTokenId(o.market);
+  const assets: ChainAsset[] =
+    mToken !== null && remainingCapital > 0n ? [{ tokenId: mToken, amount: remainingCapital }] : [];
+  return minBoxValue({
+    ergoTree: o.script.ergoTreeHex,
+    value: MIN_BOX,
+    creationHeight: o.box.creationHeight > 0 ? o.box.creationHeight : undefined,
+    assets,
+    additionalRegisters: offerContinuationRegisters(o)
+  });
 }
 
 export function policyValid(o: ZcOffer): boolean {
@@ -656,12 +749,14 @@ export function offerRefusal(
   const ignoreYield = opts?.ignoreYield ?? false;
   const o = s.offer;
   const at = height + 1n;
+  const slackAt = bigMax(at, bigMin(height + QUOTE_BLOCKS, o.expiry - 1n));
   const remaining = bond.maturity - at;
+  const remainingLate = bond.maturity - slackAt;
   const fee = fillFee(s, price);
   const c = offerCost(s, price);
   const delivery = deliveryErgBig(o, shares);
-  const ergOut =
-    fee + delivery + (primary ? feeReserve(o) : 0n) + (primary ? bond.principalErg : MIN_BOX);
+  const ergBesidePrice = !isTokenOffer(o) ? price : primary ? bond.principalErg : MIN_BOX;
+  const ergOut = fee + delivery + (primary ? feeReserve(o) : 0n) + ergBesidePrice;
 
   if (at >= o.expiry) return `the offer expired at ${o.expiry}`;
   if (!policyValid(o)) return "the offer names an unknown collateral policy";
@@ -674,17 +769,29 @@ export function offerRefusal(
   if (o.market !== bond.market) {
     return `the offer lends ${o.market}, the bond repays ${bond.market}`;
   }
-  if (remaining <= 0n || remaining < minBlocks(o) || remaining > maxBlocks(o)) {
+  const fractionalMintHash = getZcScript("FractionalMint", null).treeHash;
+  if (
+    (shares || (delivers(o) && o.mintHashHex !== fractionalMintHash)) &&
+    bond.collateral.length > MAX_COLLATERAL_TOKENS
+  ) {
+    return `the bond holds ${bond.collateral.length} collateral tokens, above the ${MAX_COLLATERAL_TOKENS}-token share-vault limit`;
+  }
+  if (remaining <= 0n || remainingLate < minBlocks(o) || remaining > maxBlocks(o)) {
     return `${remaining} blocks to maturity, outside the offer's ${minBlocks(o)} to ${maxBlocks(o)}`;
   }
   if (price <= 0n || price < minPrice(o)) return "under the offer's least price";
   const curve = offerCurve(o);
   if (!curve.ordered || o.terms[0] < 0n) return "the offer's curve is malformed";
-  if (
-    !isValidLong(c) ||
-    (!ignoreYield && !curve.accepts(bond.repayment, units, c, whole, remaining))
-  ) {
+  if (!isValidLong(c)) {
     return `under the offer's ${curve.bpsAt(remaining)} bps at ${remaining} blocks`;
+  }
+  if (!ignoreYield) {
+    for (let hCheck = at; hCheck <= slackAt; hCheck++) {
+      const remCheck = bond.maturity - hCheck;
+      if (!curve.accepts(bond.repayment, units, c, whole, remCheck)) {
+        return `under the offer's ${curve.bpsAt(remCheck)} bps at ${remCheck} blocks`;
+      }
+    }
   }
   if (s.capital < price) return "the offer's capital is short";
   if (!isValidLong(ergOut) || ergOut < 0n) return "the fill's ERG requirement overflows";
@@ -708,8 +815,12 @@ export function offerRefusal(
   if (isTokenOffer(o) && ergOut * originalCapital(s) > spendBudget(o) * price) {
     return "over the offer's ERG budget";
   }
-  if (isTokenOffer(o) && s.value - ergOut < MIN_BOX + batcherFee(o)) {
-    return "the fill would spend the offer's refund reserve";
+  const minCont = minContinuationErg(o, isTokenOffer(o) ? s.capital - price : 0n);
+  if (!isTokenOffer(o) && s.value - ergOut < minCont) {
+    return "the offer cannot cover price, fees and continuation minimum";
+  }
+  if (isTokenOffer(o) && s.value - ergOut < bigMax(minCont, MIN_BOX + batcherFee(o))) {
+    return "the fill would spend the offer's refund reserve or continuation minimum";
   }
   if (bond.liqHash !== hashOf("OracleLiquidation", o.market)) {
     return "the bond's rule is not the oracle rule";
@@ -757,33 +868,68 @@ export function windowMaturity(
   const o = s.offer;
   const start = height;
   const at = start + 1n;
+  const slackAt = bigMax(at, bigMin(start + QUOTE_BLOCKS, o.expiry - 1n));
   const win = orderWindow(order);
   const borrow = borrowCurve(order);
   if (!win || !borrow || minBlocks(o) < 1n || maxBlocks(o) < minBlocks(o)) return null;
 
   const [lo, hi] = win;
-  const fromBig = bigMax(start + lo, at + minBlocks(o));
+  const fromBig = bigMax(start + lo, slackAt + minBlocks(o));
   const toBig = bigMin(bigMin(start + hi, at + maxBlocks(o)), LONG_MAX);
   if (!isValidLong(fromBig) || fromBig > toBig) return null;
 
-  const candSet = new Set<bigint>();
+  const knotSet = new Set<bigint>();
+  const addKnot = (m: bigint) => {
+    if (m >= fromBig && m <= toBig && isValidLong(m)) knotSet.add(m);
+  };
+  addKnot(fromBig);
+  addKnot(toBig);
+  for (const d of borrow.breakpoints) {
+    addKnot(at + d);
+  }
+  for (const [, d] of o.curve) {
+    addKnot(at + d);
+  }
+
+  const candSet = new Set<bigint>(knotSet);
   const addCand = (m: bigint) => {
     if (m >= fromBig && m <= toBig && isValidLong(m)) candSet.add(m);
   };
-  addCand(fromBig);
-  addCand(toBig);
-  for (const d of borrow.breakpoints) {
-    addCand(start + d);
-    addCand(at + d);
-  }
-  for (const [, d] of o.curve) {
-    addCand(at + d);
-  }
   for (const g of gridBetween(fromBig, toBig)) {
     addCand(g);
   }
 
   const curve = offerCurve(o);
+  const gapOf = (m: bigint): bigint | null => {
+    const pRes = resolvePrincipal(order, height, m);
+    if (!pRes.ok) return null;
+    const [rate, span] = curve.at(m - at);
+    return (
+      rankYield(order.repayment, offerCost(s, pRes.value), m - at) - (rate * 1_000_000n) / span
+    );
+  };
+
+  // On ERG offers the fixed batcherFee amortizes over duration D, creating concave interior
+  // yield peaks between piecewise-linear breakpoints. Search each segment with ternary search.
+  if (!isTokenOffer(o)) {
+    const knots = Array.from(knotSet).sort((a, b) => (a < b ? -1 : a > b ? 1 : 0));
+    for (let i = 0; i + 1 < knots.length; i++) {
+      let l = knots[i];
+      let r = knots[i + 1];
+      if (r - l <= 2n) continue;
+      while (r - l > 3n) {
+        const m1 = l + (r - l) / 3n;
+        const m2 = r - (r - l) / 3n;
+        const g1 = gapOf(m1);
+        const g2 = gapOf(m2);
+        if (g1 === null || g2 === null) break;
+        if (g1 < g2) l = m1;
+        else r = m2;
+      }
+      for (let m = l; m <= r; m++) addCand(m);
+    }
+  }
+
   const feasible: { m: bigint; gap: bigint }[] = [];
   for (const m of candSet) {
     const pRes = resolvePrincipal(order, height, m);

@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { ArrowRightIcon, XIcon } from "@zhuowenli/vue-feather-icons";
-import { computed, onBeforeUnmount, onMounted, ref } from "vue";
+import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import CoverMeter from "./CoverMeter.vue";
 import { ExecutionPreviewPayload } from "./ExecutionPreviewModal.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
@@ -51,8 +51,19 @@ const walletBalForMarket = computed(() =>
 );
 const repayShort = computed(() => repayDue.value > walletBalForMarket.value + 1e-6);
 
-// --- Add Collateral state (supports both SigUSD & ERG top-ups!) ---
-const addAsset = ref<ZcMarket>(market.value === "ERG" ? "SigUSD" : "ERG");
+// --- Add Collateral state ---
+// SF-3: ZC_Standard_Bond only accepts ERG, existing collateral tokens, or the repayment token.
+// On an ERG bond with zero SigUSD collateral, SigUSD cannot be introduced on recollateralize.
+const canAddSigUsd = computed(
+  () => market.value === "SigUSD" || (bond.value.collateral.usd || 0) > 0
+);
+const addAssetOptions = computed<ZcMarket[]>(() =>
+  canAddSigUsd.value ? ["SigUSD", "ERG"] : ["ERG"]
+);
+const addAsset = ref<ZcMarket>(market.value === "ERG" && canAddSigUsd.value ? "SigUSD" : "ERG");
+watch(canAddSigUsd, (ok) => {
+  if (!ok && addAsset.value === "SigUSD") addAsset.value = "ERG";
+});
 const addAmountText = ref("");
 
 const addAmountNum = computed(() => {
@@ -303,7 +314,7 @@ onBeforeUnmount(() => document.removeEventListener("keydown", onKey));
         <div class="flex items-center justify-between gap-2">
           <div class="sf-seg">
             <button
-              v-for="a in (['SigUSD', 'ERG'] as ZcMarket[])"
+              v-for="a in addAssetOptions"
               :key="a"
               type="button"
               class="sf-seg-btn !h-7 !px-3 !text-[11.5px]"

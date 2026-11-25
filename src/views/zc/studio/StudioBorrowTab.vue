@@ -727,7 +727,7 @@ function openPreview() {
                   : 'border-[color:var(--sf-line)] bg-[color:var(--sf-well-soft)] text-[color:var(--sf-muted)] hover:text-[color:var(--sf-ink)]'
               "
               :disabled="timingMode === 'term'"
-              title="Snap maturity date to the 360-block liquidity grid"
+              title="Snap maturity date to the 21,600-block (~30 days) liquidity grid"
               @click="exactMaturity = !exactMaturity"
             >
               {{ timingMode === "term" ? "From fill" : exactMaturity ? "Exact date" : "Grid snap" }}
@@ -1078,6 +1078,7 @@ function openPreview() {
           <zc-token-picker
             v-model="extraTokens"
             :exclude-ids="[SIGUSD_TOKEN_ID]"
+            :max-tokens="Number(usdColText) > 0 ? 29 : 30"
             compact
             show-wrap-action
             tone="ask"

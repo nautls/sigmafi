@@ -16,7 +16,7 @@ import {
   kindLabel,
   pricingName,
   resolvedAskQuote,
-  SHARES_UNITS,
+  shareTotalOf,
   windowCandidates
 } from "@/utils/zcMath";
 
@@ -44,6 +44,8 @@ const candidates = computed(() =>
 const windowBlocks = ref<number>(0);
 const sharesPct = ref<number>(100);
 
+const askShareTotal = computed(() => shareTotalOf(props.ask));
+
 function initState() {
   if (isWindow.value && props.ask.window) {
     const best = resolvedAskQuote(props.ask, props.height);
@@ -51,17 +53,17 @@ function initState() {
     windowBlocks.value = best?.d ?? gridHit ?? props.ask.window.min;
   }
   if (isShares.value) {
-    sharesPct.value = (props.ask.units / SHARES_UNITS) * 100;
+    sharesPct.value = (props.ask.units / askShareTotal.value) * 100;
   }
 }
 
 watch(() => props.ask.id, initState, { immediate: true });
 
 const maxSharesPct = computed(() =>
-  isShares.value ? Math.max(0.01, (props.ask.units / SHARES_UNITS) * 100) : 100
+  isShares.value ? Math.max(0.01, (props.ask.units / askShareTotal.value) * 100) : 100
 );
 const minSharesPct = computed(() =>
-  isShares.value ? Math.max(0.01, ((props.ask.minFill || 1) / SHARES_UNITS) * 100) : 100
+  isShares.value ? Math.max(0.01, ((props.ask.minFill || 1) / askShareTotal.value) * 100) : 100
 );
 
 const selectedUnits = computed(() => {
@@ -69,7 +71,7 @@ const selectedUnits = computed(() => {
   return Math.round(
     Math.min(
       props.ask.units,
-      Math.max(props.ask.minFill || 1, (sharesPct.value / 100) * SHARES_UNITS)
+      Math.max(props.ask.minFill || 1, (sharesPct.value / 100) * askShareTotal.value)
     )
   );
 });
@@ -138,7 +140,7 @@ function proceedToSign() {
         ? [
             {
               label: "Share lot",
-              value: `${formatNumber((selectedUnits.value / SHARES_UNITS) * 100, 2, 0)} / 100 shares`
+              value: `${formatNumber((selectedUnits.value / askShareTotal.value) * 100, 2, 0)} / 100 shares`
             }
           ]
         : []),

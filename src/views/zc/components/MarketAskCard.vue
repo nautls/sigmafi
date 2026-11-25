@@ -28,7 +28,7 @@ import {
   liquidationPrice,
   pricingName,
   resolvedAskQuote,
-  SHARES_UNITS,
+  shareTotalOf,
   SIGUSD_TOKEN_ID
 } from "@/utils/zcMath";
 
@@ -114,7 +114,7 @@ const grossGain = computed(() => {
 });
 
 const sharesAvailPct = computed(() =>
-  isShares.value ? (props.ask.units / SHARES_UNITS) * 100 : 100
+  isShares.value ? (props.ask.units / shareTotalOf(props.ask)) * 100 : 100
 );
 
 const sparkPoints = computed(() => askPath(props.ask, props.height, 16));

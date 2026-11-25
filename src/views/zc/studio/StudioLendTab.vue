@@ -134,6 +134,11 @@ const simLoading = ref(false);
 function buildDraft(useProbeCapital = false) {
   const cap = capitalNum.value ?? (useProbeCapital ? 200 : null);
   if (!cap) return null;
+  const delOpening = Math.max(0, Math.min(10_000, Number(delOpeningText.value) || 200));
+  const delFloor = Math.max(0, Math.min(delOpening, Number(delFloorText.value) || 90));
+  const delLength = Math.max(30, Math.round((delLengthDays.value || 1) * DAY_BLOCKS));
+  const delExpiry = Math.max(delLength, Math.round((delExpiryDays.value || 3) * DAY_BLOCKS));
+
   return buildOfferBody({
     market: market.value,
     capital: cap,
@@ -154,10 +159,10 @@ function buildDraft(useProbeCapital = false) {
     deliveryAuction:
       delivery.value !== "unit"
         ? {
-            opening: Number(delOpeningText.value) || 200,
-            floor: Number(delFloorText.value) || 90,
-            length: Math.max(30, Math.round((delLengthDays.value || 1) * DAY_BLOCKS)),
-            expiry: Math.max(60, Math.round((delExpiryDays.value || 3) * DAY_BLOCKS))
+            opening: delOpening,
+            floor: delFloor,
+            length: delLength,
+            expiry: delExpiry
           }
         : undefined,
     tokenBudget:
@@ -166,7 +171,7 @@ function buildDraft(useProbeCapital = false) {
             refundFee: Number(feeText.value) || 0.005,
             ergFunding: Number(ergFundingText.value) || 0.5,
             rewardBudget: Number(rewardBudgetText.value) || 0.1,
-            minFillBps: Math.max(10, Math.round((Number(minFillPctText.value) || 1) * 100))
+            minFillBps: Math.max(100, Math.min(10_000, Math.round((Number(minFillPctText.value) || 1) * 100)))
           }
         : undefined
   });

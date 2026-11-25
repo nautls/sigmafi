@@ -61,7 +61,7 @@ import {
   priceForYield,
   pricingName,
   resolvedAskQuote,
-  SHARES_UNITS,
+  shareTotalOf,
   signedFormat,
   SIGUSD_TOKEN_ID,
   snapMaturity,
@@ -155,7 +155,7 @@ async function loadRecord() {
     }
 
     if (askObj?.kind === "shares") {
-      sharesPct.value = (askObj.units / SHARES_UNITS) * 100;
+      sharesPct.value = (askObj.units / shareTotalOf(askObj)) * 100;
     }
     windowPickBlocks.value = null;
     shockPct.value = 0;
@@ -231,12 +231,14 @@ const myBorrowPosition = computed(() => {
 const isWindow = computed(() => ask.value?.pricing === "window" && !!ask.value.window);
 const isSharesAsk = computed(() => ask.value?.kind === "shares");
 
+const askShareTotal = computed(() => shareTotalOf(ask.value));
+
 const maxSharesPct = computed(() =>
-  isSharesAsk.value && ask.value ? Math.max(0.01, (ask.value.units / SHARES_UNITS) * 100) : 100
+  isSharesAsk.value && ask.value ? Math.max(0.01, (ask.value.units / askShareTotal.value) * 100) : 100
 );
 const minSharesPct = computed(() =>
   isSharesAsk.value && ask.value
-    ? Math.max(0.01, ((ask.value.minFill || 1) / SHARES_UNITS) * 100)
+    ? Math.max(0.01, ((ask.value.minFill || 1) / askShareTotal.value) * 100)
     : 100
 );
 const selectedShareUnits = computed(() => {
@@ -244,7 +246,7 @@ const selectedShareUnits = computed(() => {
   return Math.round(
     Math.min(
       ask.value.units,
-      Math.max(ask.value.minFill || 1, (sharesPct.value / 100) * SHARES_UNITS)
+      Math.max(ask.value.minFill || 1, (sharesPct.value / 100) * askShareTotal.value)
     )
   );
 });
@@ -625,7 +627,7 @@ function openActionPreview(
       rows: [
         { label: "Listing", value: shortenString(ask.value.id, 14) },
         { label: "Term", value: `${formatDur(q.d, unit.value)} (${dateAtHeight(q.maturity, height.value)})` },
-        ...(isSharesAsk.value ? [{ label: "Shares", value: `${formatNumber((selectedShareUnits.value / SHARES_UNITS) * 100, 2, 0)}%` }] : []),
+        ...(isSharesAsk.value ? [{ label: "Shares", value: `${formatNumber((selectedShareUnits.value / askShareTotal.value) * 100, 2, 0)}%` }] : []),
         { label: "Cover", value: covNow.value != null ? `${Math.round(covNow.value)}%` : "Maturity only" }
       ],
       rawSummary: {
@@ -1290,7 +1292,7 @@ function openActionPreview(
                   Shares to buy
                 </span>
                 <span class="sf-mono text-[11px] font-bold text-[color:var(--sf-ink)]">
-                  {{ formatNumber((selectedShareUnits / SHARES_UNITS) * 100, 2, 0) }}%
+                  {{ formatNumber((selectedShareUnits / askShareTotal) * 100, 2, 0) }}%
                 </span>
               </div>
               <input
@@ -1473,7 +1475,7 @@ function openActionPreview(
                   <span>Split into 100 Shares</span>
                 </router-link>
                 <button
-                  v-if="myLendPosition.kind === 'shares' && myLendPosition.units >= SHARES_UNITS"
+                  v-if="myLendPosition.kind === 'shares' && myLendPosition.units >= shareTotalOf(myLendPosition)"
                   type="button"
                   class="sf-btn-outline flex h-9 w-full items-center justify-center gap-2 rounded-xl text-[12.5px]"
                   @click="openActionPreview('unfrac')"

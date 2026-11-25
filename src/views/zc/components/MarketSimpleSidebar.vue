@@ -52,7 +52,7 @@ import {
   repaymentFor,
   roundDown,
   roundUp,
-  SHARES_UNITS,
+  shareTotalOf,
   SIGUSD_TOKEN_ID,
   snapMaturity,
   yieldForPrice
@@ -524,7 +524,7 @@ const activePos = computed<ZcPortfolioPosition | null>(
 const posFrac = computed(() =>
   activePos.value
     ? activePos.value.kind === "shares"
-      ? activePos.value.units / SHARES_UNITS
+      ? activePos.value.units / shareTotalOf(activePos.value)
       : 1
     : 1
 );
@@ -618,11 +618,12 @@ const coverOptions = computed<ZcSelectOption[]>(() =>
 const heldSelectOptions = computed<ZcSelectOption[]>(() =>
   heldPositions.value.map((p) => {
     const rem = Math.max(1, p.bond.maturity - props.height);
+    const total = shareTotalOf(p);
     const label = `${
       p.kind === "shares"
-        ? `${formatNumber((p.units / SHARES_UNITS) * 100, 1, 0)} sh`
+        ? `${formatNumber((p.units / total) * 100, 1, 0)} sh`
         : "Bond"
-    } · ${formatMarketAmount(p.bond.repayment * (p.kind === "shares" ? p.units / SHARES_UNITS : 1), p.bond.market)} · ${formatDur(rem, props.unit)}`;
+    } · ${formatMarketAmount(p.bond.repayment * (p.kind === "shares" ? p.units / total : 1), p.bond.market)} · ${formatDur(rem, props.unit)}`;
     return { value: p.id, label, shortLabel: label };
   })
 );

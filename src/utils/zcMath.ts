@@ -22,6 +22,24 @@ export const YEAR_BLOCKS = 262_800;
 export const GRID_BLOCKS = 21_600;
 export const DAY_BLOCKS = 720;
 export const SHARES_UNITS = 100_000_000;
+
+/**
+ * Resolves a share vault's total share supply from an ask or portfolio position,
+ * falling back to the zcs1 standard `SHARES_UNITS` (100,000,000) only when absent.
+ */
+export function shareTotalOf(
+  item:
+    | {
+        shareCount?: number | string | null;
+        shares?: { shareCount?: number | string | null } | null;
+      }
+    | null
+    | undefined
+): number {
+  const raw = item?.shareCount ?? item?.shares?.shareCount;
+  const n = raw != null ? Number(raw) : NaN;
+  return Number.isFinite(n) && n > 0 ? n : SHARES_UNITS;
+}
 export const MIN_COVER = 125;
 export const DEFAULT_COVER = 150;
 export const MIN_MATURITY_BLOCKS = DAY_BLOCKS;
@@ -214,7 +232,7 @@ export function askQuote(ask: ZcAskSummary, height: number, pick?: number | null
     }
   } else {
     if (!ask.bond) return null;
-    const frac = ask.kind === "shares" ? ask.units / SHARES_UNITS : 1;
+    const frac = ask.kind === "shares" ? ask.units / shareTotalOf(ask) : 1;
     face = ask.bond.repayment * frac;
     if (ask.pricing === "fixed") {
       if (ask.price == null) return null;
@@ -1150,7 +1168,7 @@ export function positionPnl(
 ): ZcPositionPnl {
   const b = p.bond;
   const market = b.market || "SigUSD";
-  const frac = p.kind === "shares" ? p.units / SHARES_UNITS : 1;
+  const frac = p.kind === "shares" ? p.units / shareTotalOf(p) : 1;
   const face = (b.repayment || 0) * frac;
   const paid = p.paid ?? null;
   const at = p.at ?? b.start ?? height;

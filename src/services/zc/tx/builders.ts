@@ -17,9 +17,12 @@ import {
 } from "@fleet-sdk/common";
 import { hex } from "@fleet-sdk/crypto";
 import {
+  boxCandidateSize,
   ChainAsset,
   ChainBox,
+  MAX_BOX_SIZE,
   MIN_BOX,
+  minBoxValue,
   ZcAsk,
   ZcBond,
   ZcLot,
@@ -38,7 +41,7 @@ import {
   marketTokenId,
   MINER_FEE_ERGO_TREE
 } from "../contracts";
-import { bigMax } from "../pricing";
+import { bigMax, isValidLong } from "../pricing";
 import {
   auctionOpen,
   currencyHeld,
@@ -62,8 +65,7 @@ import {
   encodeUtf8,
   encodeUtf8Bytes,
   registersFromList,
-  registersToList,
-  setRegisterNumber
+  registersToList
 } from "./encoding";
 import {
   applyScriptDisclosure,
@@ -460,19 +462,20 @@ export function buildBuyAskSpend(params: {
         };
 
   const rest = ask.token.amount - units;
-  const continuationOut: TxOutputDraft | null =
-    rest <= 0n
-      ? null
-      : {
-          ergoTree: ask.script.ergoTreeHex,
-          value: ask.box.value,
-          assets: [{ tokenId: ask.token.tokenId, amount: rest }],
-          additionalRegisters: setRegisterNumber(
-            askBox.additionalRegisters,
-            ask.priced ? 8 : 6,
-            encodeHexBytes(ask.boxId)
-          )
-        };
+  let continuationOut: TxOutputDraft | null = null;
+  if (rest > 0n) {
+    const baseRegs = registersToList(askBox.additionalRegisters).slice(0, ask.priced ? 4 : 2);
+    const contBase: TxOutputDraft = {
+      ergoTree: ask.script.ergoTreeHex,
+      value: ask.box.value,
+      assets: [{ tokenId: ask.token.tokenId, amount: rest }],
+      additionalRegisters: registersFromList([...baseRegs, encodeHexBytes(ask.boxId)])
+    };
+    continuationOut = {
+      ...contBase,
+      value: bigMax(ask.box.value, minBoxValue(contBase))
+    };
+  }
 
   const ext: Record<number, string> = { 0: encodeInt(0) };
   if (continuationOut !== null) {
@@ -593,11 +596,15 @@ export function buildRepaySpend(params: {
     }
   }
 
-  const backOut: TxOutputDraft = {
+  const backBase: TxOutputDraft = {
     ergoTree: borrowerTree,
     value: backErg,
     assets: backTokens,
     additionalRegisters: registersFromList([encodeHexBytes(bond.boxId)])
+  };
+  const backOut: TxOutputDraft = {
+    ...backBase,
+    value: bigMax(backErg, minBoxValue(backBase))
   };
 
   const inputs: EIP12UnsignedInput[] = [
@@ -766,16 +773,20 @@ export function buildClaimSharesSpend(params: {
   const assets = vault.box.assets.slice(1);
 
   if (burned >= vault.outstanding) {
+    const payoutBase: TxOutputDraft = {
+      ergoTree: toTree,
+      value: vault.box.value,
+      assets,
+      additionalRegisters: tag
+    };
     return {
       inputs: [chainBoxToUnsignedInput(vaultBox, { 1: encodeInt(0) })],
       protocolIndices: new Set([0]),
       authIndices: new Set(),
       outputs: [
         {
-          ergoTree: toTree,
-          value: bigMax(vault.box.value, MIN_BOX),
-          assets,
-          additionalRegisters: tag
+          ...payoutBase,
+          value: bigMax(vault.box.value, minBoxValue(payoutBase))
         }
       ],
       burn: [{ tokenId: vault.shareId, amount: vault.outstanding + vault.shares + 1n }],
@@ -797,14 +808,28 @@ export function buildClaimSharesSpend(params: {
     if (k > 0n) kept.push({ tokenId: t.tokenId, amount: k });
   }
 
-  const regs = registersToList(vaultBox.additionalRegisters);
+  // FS-3: slice strictly to schema register count so unknown trailing spam registers are stripped.
+  const baseRegs = registersToList(vaultBox.additionalRegisters).slice(0, vault.dutch ? 5 : 3);
   const nextState = auctionOpen(vault) ? 3 : vault.state;
-  const nextRegs = [...regs];
+  const nextRegs = [...baseRegs];
   nextRegs[1] = encodeLongs([vault.shares, vault.outstanding - burned, vault.pullFee]);
   if (nextState !== null) {
     if (nextRegs.length > 2) nextRegs[2] = encodeByte(nextState);
     else nextRegs.push(encodeByte(nextState));
   }
+
+  const payoutBase: TxOutputDraft = {
+    ergoTree: toTree,
+    value: paidErg,
+    assets: paid,
+    additionalRegisters: tag
+  };
+  const contBase: TxOutputDraft = {
+    ergoTree: vault.script.ergoTreeHex,
+    value: vault.box.value - paidErg,
+    assets: [{ tokenId: vault.shareId, amount: vault.shares + 1n }, ...kept],
+    additionalRegisters: registersFromList(nextRegs)
+  };
 
   return {
     inputs: [chainBoxToUnsignedInput(vaultBox, { 0: encodeInt(1), 1: encodeInt(0) })],
@@ -812,16 +837,12 @@ export function buildClaimSharesSpend(params: {
     authIndices: new Set(),
     outputs: [
       {
-        ergoTree: toTree,
-        value: bigMax(paidErg, MIN_BOX),
-        assets: paid,
-        additionalRegisters: tag
+        ...payoutBase,
+        value: bigMax(paidErg, minBoxValue(payoutBase))
       },
       {
-        ergoTree: vault.script.ergoTreeHex,
-        value: vault.box.value - paidErg,
-        assets: [{ tokenId: vault.shareId, amount: vault.shares + 1n }, ...kept],
-        additionalRegisters: registersFromList(nextRegs)
+        ...contBase,
+        value: bigMax(vault.box.value - paidErg, minBoxValue(contBase))
       }
     ],
     burn: [{ tokenId: vault.shareId, amount: burned }],
@@ -923,6 +944,9 @@ export function buildPullSpend(params: {
 }): { readonly spend: ZcSpendDraft; readonly nextState: number | null } {
   const { vault, vaultBox, source, sourceBox, height } = params;
   const value = vault.box.value + source.box.value - vault.pullFee;
+  if (value < 0n || !isValidLong(value)) {
+    throw new ZcTxRefusalError("the pulled vault value overflows 64-bit nanoERG bounds");
+  }
   const proceeds = source.proceeds;
   const supply: string[] = [
     encodeHexBytes(vault.bondAsset),
@@ -966,11 +990,21 @@ export function buildPullSpend(params: {
     ];
   }
 
-  const nextVaultOut: TxOutputDraft = {
+  const nextVaultBase: TxOutputDraft = {
     ergoTree: vault.script.ergoTreeHex,
-    value,
+    value: bigMax(value, MIN_BOX),
     assets: [{ tokenId: vault.shareId, amount: vault.shares + 1n }, ...proceeds],
     additionalRegisters: registersFromList(regs)
+  };
+  const nextSize = boxCandidateSize(nextVaultBase);
+  if (nextSize > MAX_BOX_SIZE) {
+    throw new ZcTxRefusalError(
+      `Pulling this settlement would create a ${nextSize}-byte share vault (max ${MAX_BOX_SIZE} bytes); hold 100% of shares to make a final claim instead.`
+    );
+  }
+  const nextVaultOut: TxOutputDraft = {
+    ...nextVaultBase,
+    value: bigMax(value, minBoxValue(nextVaultBase))
   };
 
   return {
@@ -1007,28 +1041,49 @@ export function buildBuyFromVaultSpend(params: {
     }
     after = before + p;
   } else {
-    after = bigMax(lotTarget(vault, height), before);
+    const target = lotTarget(vault, height);
+    if (target === null) {
+      throw new ZcTxRefusalError("the vault auction's target price overflows");
+    }
+    after = bigMax(target, before);
   }
 
-  const regs = setRegisterNumber(vaultBox.additionalRegisters, 6, encodeByte(2));
+  // FS-3: slice strictly to 5 protocol registers (R4..R8) so unknown trailing R9 spam is stripped.
+  const baseRegs = registersToList(vaultBox.additionalRegisters).slice(0, 5);
+  if (baseRegs.length < 5) {
+    throw new ZcTxRefusalError("Dutch share vault is missing required registers R4..R8.");
+  }
+  baseRegs[2] = encodeByte(2);
+  const regs = registersFromList(baseRegs);
   const kept = keptBySale(vault);
   const reserve: ChainAsset = { tokenId: vault.shareId, amount: vault.shares + 1n };
   const cur = vaultCurrency(vault);
 
-  const soldOut: TxOutputDraft =
-    cur === null
-      ? {
-          ergoTree: vault.script.ergoTreeHex,
-          value: after,
-          assets: [reserve, ...kept],
-          additionalRegisters: regs
-        }
-      : {
-          ergoTree: vault.script.ergoTreeHex,
-          value: saleKeepsErg(vault) ? vault.box.value : MIN_BOX,
-          assets: [reserve, { tokenId: cur, amount: after }, ...kept],
-          additionalRegisters: regs
-        };
+  let soldOut: TxOutputDraft;
+  if (cur === null) {
+    const soldBase: TxOutputDraft = {
+      ergoTree: vault.script.ergoTreeHex,
+      value: bigMax(after, MIN_BOX),
+      assets: [reserve, ...kept],
+      additionalRegisters: regs
+    };
+    soldOut = {
+      ...soldBase,
+      value: bigMax(after, minBoxValue(soldBase))
+    };
+  } else {
+    const soldBase: TxOutputDraft = {
+      ergoTree: vault.script.ergoTreeHex,
+      value: saleKeepsErg(vault) ? vault.box.value : MIN_BOX,
+      assets: [reserve, { tokenId: cur, amount: after }, ...kept],
+      additionalRegisters: regs
+    };
+    const minErg = minBoxValue(soldBase);
+    soldOut = {
+      ...soldBase,
+      value: saleKeepsErg(vault) ? bigMax(vault.box.value, minErg) : minErg
+    };
+  }
 
   return {
     inputs: [chainBoxToUnsignedInput(vaultBox, { 0: encodeInt(0) })],
@@ -1081,14 +1136,33 @@ export function buildUnwrapSpend(params: {
   readonly vault: ZcWrapVault;
   readonly vaultBox: ChainBox;
   readonly toTree: string;
+  readonly holderBox?: ChainBox | null;
 }): ZcSpendDraft {
-  const { vault, vaultBox, toTree } = params;
+  const { vault, vaultBox, toTree, holderBox = null } = params;
+  const receiptId = vault.receiptId.toLowerCase();
+  const vaultLocked = vaultBox.assets
+    .filter((a) => a.tokenId.toLowerCase() === receiptId)
+    .reduce((acc, a) => acc + a.amount, 0n);
+  const holderCount = holderBox
+    ? holderBox.assets
+        .filter((a) => a.tokenId.toLowerCase() === receiptId)
+        .reduce((acc, a) => acc + a.amount, 0n)
+    : 1n;
+  const burned = vaultLocked + (holderCount > 0n ? holderCount : 1n);
+
+  const inputs: EIP12UnsignedInput[] = [chainBoxToUnsignedInput(vaultBox)];
+  const authIndices = new Set<number>();
+  if (holderBox) {
+    inputs.push(chainBoxToUnsignedInput(holderBox));
+    authIndices.add(1);
+  }
+
   return {
-    inputs: [chainBoxToUnsignedInput(vaultBox)],
+    inputs,
     protocolIndices: new Set([0]),
-    authIndices: new Set(),
+    authIndices,
     outputs: [],
-    burn: [{ tokenId: vault.receiptId, amount: 3n }],
+    burn: [{ tokenId: receiptId, amount: burned }],
     minted: null,
     dataInputs: [],
     alone: false,
@@ -1185,10 +1259,23 @@ export function assemblePostTx(params: {
     if (amount > 0n) changeTokens.push({ tokenId, amount });
   }
 
-  // If change tokens exist but leftErg < MIN_BOX, pull one more ERG box so change box is legal
-  if (changeTokens.length > 0 && leftErg < MIN_BOX) {
+  const changeMinErg = (tokens: readonly ChainAsset[]): bigint =>
+    tokens.length === 0
+      ? MIN_BOX
+      : minBoxValue({
+          ergoTree: walletBook.changeTreeHex,
+          value: MIN_BOX,
+          creationHeight: height,
+          assets: tokens,
+          additionalRegisters: {}
+        });
+
+  // If change tokens exist (or change ERG falls below dynamic minBoxValue), pull more ERG boxes
+  for (let pass = 0; pass < 3; pass++) {
+    const reqMin = changeMinErg(changeTokens);
+    if (changeTokens.length === 0 || leftErg >= reqMin) break;
     const pickedIds = new Set(funding.map((u) => u.boxId));
-    const extra = selectWalletFunding(walletUtxos, MIN_BOX - leftErg, [], {
+    const extra = selectWalletFunding(walletUtxos, reqMin - leftErg, [], {
       excludeBoxIds: pickedIds,
       walletBook
     });
@@ -1206,12 +1293,13 @@ export function assemblePostTx(params: {
     }
   }
 
+  const finalChangeMin = changeMinErg(changeTokens);
   const dust = leftErg > 0n && leftErg < MIN_BOX && changeTokens.length === 0 ? leftErg : 0n;
   const minerFee = TX_FEE + dust;
   const outputs: BoxCandidate<string>[] = [draftToCandidate(box, height)];
   const walletOutputIndices = new Set<number>();
 
-  if (leftErg >= MIN_BOX) {
+  if (leftErg >= finalChangeMin && (leftErg >= MIN_BOX || changeTokens.length > 0)) {
     walletOutputIndices.add(outputs.length);
     outputs.push({
       ergoTree: walletBook.changeTreeHex,
@@ -1220,6 +1308,10 @@ export function assemblePostTx(params: {
       assets: changeTokens.map((t) => ({ tokenId: t.tokenId, amount: t.amount.toString() })),
       additionalRegisters: {}
     });
+  } else if (changeTokens.length > 0) {
+    throw new ZcTxRefusalError(
+      `Insufficient ERG to fund the change box carrying ${changeTokens.length} tokens.`
+    );
   }
   outputs.push(minerFeeCandidate(minerFee, height));
 
@@ -1360,6 +1452,7 @@ export function assembleSpendTx(params: {
   readonly quote: ZcTxQuote;
   readonly assetId?: string | null;
   readonly limits?: ZcTxLimits;
+  readonly namedTreeHex?: string | null;
 }): ZcBuiltTx {
   const {
     action,
@@ -1370,20 +1463,35 @@ export function assembleSpendTx(params: {
     height,
     quote,
     assetId = null,
-    limits
+    limits,
+    namedTreeHex = null
   } = params;
 
   const initial = spendLeftover(spend, spend.inputs);
   const shortTokens: ChainAsset[] = [];
+  const initialKeptTokens: ChainAsset[] = [];
   let carries = spend.sweepToTree !== null;
   for (const [tokenId, net] of initial.netTokens) {
     if (net < 0n) shortTokens.push({ tokenId, amount: -net });
-    else if (net > 0n) carries = true;
+    else if (net > 0n) {
+      carries = true;
+      initialKeptTokens.push({ tokenId, amount: net });
+    }
   }
 
+  const keptMinErg = (tokens: readonly ChainAsset[]): bigint =>
+    minBoxValue({
+      ergoTree: (spend.sweepToTree ?? walletBook.changeTreeHex).toLowerCase(),
+      value: MIN_BOX,
+      creationHeight: height,
+      assets: tokens,
+      additionalRegisters: {}
+    });
+
+  const initialMinKeep = carries ? keptMinErg(initialKeptTokens) : MIN_BOX;
   const selfFunded =
     shortTokens.length === 0 &&
-    (initial.erg >= MIN_BOX || (initial.erg >= 0n && !carries));
+    (initial.erg >= initialMinKeep || (initial.erg >= 0n && !carries));
 
   if (!selfFunded && spend.alone) {
     throw new ZcTxRefusalError(
@@ -1401,7 +1509,7 @@ export function assembleSpendTx(params: {
 
   let funding: ChainBox[] = [];
   if (!selfFunded) {
-    const neededErg = bigMax(0n, MIN_BOX - initial.erg);
+    const neededErg = bigMax(0n, initialMinKeep - initial.erg);
     funding = selectWalletFunding(walletUtxos, neededErg, shortTokens, {
       avoidTokens,
       excludeBoxIds,
@@ -1409,42 +1517,49 @@ export function assembleSpendTx(params: {
     });
   }
 
-  const inputs: EIP12UnsignedInput[] = [
+  const rawInputs: EIP12UnsignedInput[] = [
     ...spend.inputs,
     ...funding.map((u) => chainBoxToUnsignedInput(u))
   ];
 
-  let finalLeft = spendLeftover(spend, inputs);
-  // Edge case: if selected token-funding box had < needed ERG once extra tokens forced a change box
-  if (
-    !spend.alone &&
-    finalLeft.erg < MIN_BOX &&
-    (spend.sweepToTree !== null ||
-      Array.from(finalLeft.netTokens.values()).some((v) => v > 0n))
-  ) {
+  let finalLeft = spendLeftover(spend, rawInputs);
+  const collectKept = (leftMap: ReadonlyMap<string, bigint>): ChainAsset[] => {
+    const list: ChainAsset[] = [];
+    for (const [tokenId, net] of leftMap) {
+      if (net > 0n) list.push({ tokenId, amount: net });
+    }
+    return list;
+  };
+
+  let keptTokens = collectKept(finalLeft.netTokens);
+
+  // Pull additional ERG if selected funding boxes carry extra tokens raising dynamic minBoxValue
+  for (let pass = 0; pass < 3; pass++) {
+    if (spend.alone) break;
+    const needsBox = spend.sweepToTree !== null || keptTokens.length > 0;
+    if (!needsBox) break;
+    const minKeep = keptMinErg(keptTokens);
+    if (finalLeft.erg >= minKeep) break;
     for (const f of funding) excludeBoxIds.add(f.boxId);
-    const extra = selectWalletFunding(walletUtxos, MIN_BOX - finalLeft.erg, [], {
+    const extra = selectWalletFunding(walletUtxos, minKeep - finalLeft.erg, [], {
       avoidTokens,
       excludeBoxIds,
       walletBook
     });
     for (const u of extra) {
       funding.push(u);
-      inputs.push(chainBoxToUnsignedInput(u));
+      rawInputs.push(chainBoxToUnsignedInput(u));
     }
-    finalLeft = spendLeftover(spend, inputs);
+    finalLeft = spendLeftover(spend, rawInputs);
+    keptTokens = collectKept(finalLeft.netTokens);
   }
 
-  const keptTokens: ChainAsset[] = [];
-  for (const [tokenId, net] of finalLeft.netTokens) {
-    if (net > 0n) keptTokens.push({ tokenId, amount: net });
-  }
-
+  const finalMinKeep = keptMinErg(keptTokens);
   const outputs: BoxCandidate<string>[] = [];
   const walletOutputIndices = new Set<number>();
 
   if (spend.sweepToTree !== null) {
-    if (finalLeft.erg < MIN_BOX) {
+    if (finalLeft.erg < finalMinKeep) {
       throw new ZcTxRefusalError("the inputs hold too little ERG for the box they sweep into");
     }
     walletOutputIndices.add(0);
@@ -1466,7 +1581,7 @@ export function assembleSpendTx(params: {
         : 0n;
     const minerFee = TX_FEE + dust;
 
-    if (finalLeft.erg >= MIN_BOX) {
+    if (finalLeft.erg >= finalMinKeep && (finalLeft.erg >= MIN_BOX || keptTokens.length > 0)) {
       walletOutputIndices.add(outputs.length);
       outputs.push({
         ergoTree: walletBook.changeTreeHex,
@@ -1475,9 +1590,18 @@ export function assembleSpendTx(params: {
         assets: keptTokens.map((t) => ({ tokenId: t.tokenId, amount: t.amount.toString() })),
         additionalRegisters: {}
       });
+    } else if (keptTokens.length > 0) {
+      throw new ZcTxRefusalError(
+        `Insufficient ERG to fund the change box carrying ${keptTokens.length} tokens.`
+      );
     }
     outputs.push(minerFeeCandidate(minerFee, height));
   }
+
+  // I-8: attach zcs1 script disclosure (var 64) when a spend names a party script not present in outputs.
+  const inputs = namedTreeHex
+    ? applyScriptDisclosure(rawInputs, outputs, namedTreeHex)
+    : rawInputs;
 
   const finalFee = BigInt(outputs[outputs.length - 1].value);
   const { signers, audit } = buildNautilusV3Signers({

@@ -979,7 +979,7 @@ export class ZcGraphqlEngine {
 
     const cands = new Set<bigint>([from, until]);
     for (const d of c.breakpoints) {
-      const x = h + d;
+      const x = at + d;
       if (x >= from && x <= until) cands.add(x);
     }
     for (const g of gridBetween(from, until)) cands.add(g);
@@ -1135,7 +1135,7 @@ export class ZcGraphqlEngine {
 
       const cands = new Set<bigint>([from, until]);
       for (const d of c.breakpoints) {
-        const x = h + d;
+        const x = at + d;
         if (x >= from && x <= until) cands.add(x);
       }
       for (const eo of eligibleOffers) {
@@ -1837,15 +1837,20 @@ export class ZcGraphqlEngine {
             : { priceRaw: priceOpt.toString(), done: false };
       } else {
         const since = bigMin(bigMax(h - began, 0n), length);
-        const target = bigMax(lotTarget(v, h), held);
+        const rawTarget = lotTarget(v, h);
         const bps = (opening * length - (opening - floor) * since) / length;
         const done = h >= began + expiry;
-        quote = {
-          targetRaw: target.toString(),
-          payRaw: (target - held).toString(),
-          bps: toSafeNum(bps),
-          done
-        };
+        if (rawTarget === null) {
+          quote = { targetRaw: null, payRaw: null, bps: toSafeNum(bps), done: true };
+        } else {
+          const target = bigMax(rawTarget, held);
+          quote = {
+            targetRaw: target.toString(),
+            payRaw: (target - held).toString(),
+            bps: toSafeNum(bps),
+            done
+          };
+        }
       }
 
       const items = v.box.assets

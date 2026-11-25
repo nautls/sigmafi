@@ -22,6 +22,7 @@ const props = withDefaults(
     modelValue: SelectedWalletToken[];
     excludeIds?: string[];
     showWrapAction?: boolean;
+    maxTokens?: number;
     tone?: "bid" | "ask" | "cobalt";
     compact?: boolean;
     emptyText?: string;
@@ -29,6 +30,7 @@ const props = withDefaults(
   {
     excludeIds: () => [],
     showWrapAction: false,
+    maxTokens: 30,
     tone: "cobalt",
     compact: false,
     emptyText: "No extra tokens in connected wallet."
@@ -62,6 +64,12 @@ const availableTokens = computed(() => {
   });
 });
 
+const atLimit = computed(() => props.modelValue.length >= props.maxTokens);
+
+function isProvision(tok: ZcWalletToken) {
+  return tok.kind === "provision";
+}
+
 function toggleToken(tok: ZcWalletToken) {
   const id = tok.id.toLowerCase();
   if (selectedMap.value.has(id)) {
@@ -69,6 +77,15 @@ function toggleToken(tok: ZcWalletToken) {
       "update:modelValue",
       props.modelValue.filter((x) => x.id.toLowerCase() !== id)
     );
+    return;
+  }
+  // SF-1: raw LithosDex provision / capability NFTs must be wrapped before pledging or auctioning.
+  if (isProvision(tok)) {
+    if (props.showWrapAction) emit("wrap", tok);
+    return;
+  }
+  // FS-4: enforce distinct-token cap so liquidated share vaults stay under the 4,096 B box limit.
+  if (props.modelValue.length >= props.maxTokens) {
     return;
   }
   const next: SelectedWalletToken = {
@@ -210,6 +227,13 @@ function isNft(tok: ZcWalletToken) {
                 Wrap
               </span>
               <span
+                v-else-if="isProvision(tok)"
+                class="sf-mono rounded bg-[color:var(--sf-ask-soft)] px-1 py-0.5 text-[9px] font-semibold uppercase text-[color:var(--sf-ask)]"
+                title="Raw LithosDex provision NFT — must be wrapped into a custody receipt first"
+              >
+                Wrap req.
+              </span>
+              <span
                 v-else-if="isNft(tok)"
                 class="sf-mono rounded bg-[color:var(--sf-well)] px-1 py-0.5 text-[9px] font-semibold uppercase text-[color:var(--sf-muted)]"
               >
@@ -227,23 +251,39 @@ function isNft(tok: ZcWalletToken) {
             </span>
 
             <button
-              v-if="showWrapAction && isNft(tok) && tok.kind !== 'receipt'"
+              v-if="showWrapAction && (isProvision(tok) || (isNft(tok) && tok.kind !== 'receipt'))"
               type="button"
-              class="sf-mono inline-flex h-6 items-center gap-1 rounded-md border border-[color:var(--sf-line)] bg-[color:var(--sf-panel)] px-1.5 text-[10px] font-semibold text-[color:var(--sf-muted)] transition-colors hover:border-[color:var(--sf-line-cobalt)] hover:text-[color:var(--sf-cobalt)]"
-              title="Wrap NFT into custody receipt"
+              class="sf-mono inline-flex h-6 items-center gap-1 rounded-md border px-1.5 text-[10px] font-semibold transition-colors"
+              :class="
+                isProvision(tok)
+                  ? 'border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] text-[color:var(--sf-cobalt)] hover:brightness-110'
+                  : 'border-[color:var(--sf-line)] bg-[color:var(--sf-panel)] text-[color:var(--sf-muted)] hover:border-[color:var(--sf-line-cobalt)] hover:text-[color:var(--sf-cobalt)]'
+              "
+              :title="
+                isProvision(tok)
+                  ? 'Raw capability NFT must be wrapped into a ZCS-Wrap receipt before pledging or auctioning'
+                  : 'Wrap NFT into custody receipt'
+              "
               @click.stop="emit('wrap', tok)"
             >
               <package-icon class="h-3 w-3" />
-              <span>Wrap</span>
+              <span>{{ isProvision(tok) ? "Wrap first" : "Wrap" }}</span>
             </button>
 
             <button
+              v-if="!isProvision(tok)"
               type="button"
-              class="sf-mono inline-flex h-6 items-center gap-1 rounded-md px-2 text-[10.5px] font-semibold transition-all active:scale-95"
+              :disabled="!selectedMap.has(tok.id.toLowerCase()) && atLimit"
+              class="sf-mono inline-flex h-6 items-center gap-1 rounded-md px-2 text-[10.5px] font-semibold transition-all active:scale-95 disabled:cursor-not-allowed disabled:opacity-45"
               :class="
                 selectedMap.has(tok.id.toLowerCase())
                   ? 'bg-[color:var(--sf-cobalt)] text-white'
                   : 'border border-[color:var(--sf-line)] bg-[color:var(--sf-panel)] text-[color:var(--sf-ink)] hover:border-[color:var(--sf-line-cobalt)]'
+              "
+              :title="
+                !selectedMap.has(tok.id.toLowerCase()) && atLimit
+                  ? `Limit of ${maxTokens} distinct tokens reached`
+                  : undefined
               "
               @click="toggleToken(tok)"
             >
@@ -251,6 +291,13 @@ function isNft(tok: ZcWalletToken) {
               <plus-icon v-else class="h-3 w-3" />
               <span>{{ selectedMap.has(tok.id.toLowerCase()) ? "Added" : "Add" }}</span>
             </button>
+            <span
+              v-else-if="!showWrapAction"
+              class="sf-mono text-[10px] font-semibold text-[color:var(--sf-ask)]"
+              title="Wrap this capability NFT in Studio → Wrap before using it"
+            >
+              Wrap in Studio
+            </span>
           </div>
         </div>
       </div>

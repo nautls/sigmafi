@@ -52,6 +52,7 @@ import {
   maxAge,
   maxBlocks,
   minBlocks,
+  minContinuationErg,
   minFill,
   minFillBps,
   minPrice,
@@ -349,7 +350,8 @@ export class ZcJson {
     const disc = this.disclosureCheck(o);
     const ergShort =
       !isTokenOffer(o) &&
-      s.value <= batcherFee(o) + MIN_BOX + deliveryErgBig(o, buysShares(o));
+      s.value <= batcherFee(o) + minContinuationErg(o, 0n) + deliveryErgBig(o, buysShares(o));
+    const tokenMinCont = isTokenOffer(o) ? minContinuationErg(o, s.capital) : MIN_BOX;
     const budgetBad =
       ergShort ||
       (isTokenOffer(o) &&
@@ -361,7 +363,7 @@ export class ZcJson {
           rewardBudget(o) >= spendBudget(o) ||
           minFillBps(o) < 100n ||
           minFillBps(o) > 10_000n ||
-          s.value < MIN_BOX + batcherFee(o) + MIN_BATCHING_FEE));
+          s.value < bigMax(tokenMinCont, MIN_BOX + batcherFee(o)) + MIN_BATCHING_FEE));
 
     const checks: ZcCheck[] = [
       { key: "origin", ok: true, detail: "LendOffer script, standard" },

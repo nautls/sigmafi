@@ -166,6 +166,7 @@ const marketBalance = computed(() =>
       <studio-auction-tab
         v-else-if="activeTab === 'auction'"
         @preview="previewPayload = $event"
+        @wrap-token="handleWrapToken"
       />
       <studio-shares-tab
         v-else-if="activeTab === 'shares'"

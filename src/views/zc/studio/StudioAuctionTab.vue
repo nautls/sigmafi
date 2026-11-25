@@ -9,6 +9,7 @@ import AssetIcon from "@/components/AssetIcon.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
 import { buildLotBody } from "@/services/zcApi";
 import { useZcStore } from "@/stories";
+import { ZcWalletToken } from "@/types/zc";
 import {
   dateAtHeight,
   DAY_BLOCKS,
@@ -20,6 +21,7 @@ import {
 
 const emit = defineEmits<{
   (e: "preview", payload: ExecutionPreviewPayload): void;
+  (e: "wrap-token", token: ZcWalletToken): void;
 }>();
 
 const zc = useZcStore();
@@ -203,8 +205,10 @@ function openPreview() {
               v-model="basket"
               :exclude-ids="excludeIds"
               compact
+              show-wrap-action
               tone="ask"
               empty-text="No tokens in wallet to auction."
+              @wrap="emit('wrap-token', $event)"
             />
           </div>
 

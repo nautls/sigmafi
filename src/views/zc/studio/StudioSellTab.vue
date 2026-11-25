@@ -33,11 +33,10 @@ import {
   formatMarketAmount,
   formatNumber,
   lineAt,
-  MIN_MATURITY_BLOCKS,
   offerYieldAt,
   pnlTone,
   priceForYield,
-  SHARES_UNITS,
+  shareTotalOf,
   signedFormat,
   YEAR_BLOCKS,
   yieldForPrice
@@ -95,7 +94,7 @@ const positionOptions = computed<ZcSelectOption[]>(() =>
     const id = p.tokenId || p.id;
     const rem = Math.max(0, p.bond.maturity - height.value);
     const shareTag =
-      p.kind === "shares" ? ` · ${formatNumber((p.units / SHARES_UNITS) * 100, 1, 0)}% shares` : "";
+      p.kind === "shares" ? ` · ${formatNumber((p.units / shareTotalOf(p)) * 100, 1, 0)}% shares` : "";
     return {
       value: id,
       label: `${formatMarketAmount(p.bond.repayment, p.bond.market)} · ${formatDur(rem, unit.value)}${shareTag}`
@@ -105,7 +104,12 @@ const positionOptions = computed<ZcSelectOption[]>(() =>
 
 const posMarket = computed(() => position.value?.bond.market || zc.activeMarket);
 const posSnap = computed(() => zc.markets[posMarket.value]);
-const feeErg = computed(() => (posMarket.value === "ERG" ? 0.002 : 0));
+const matchedOffer = computed(() =>
+  props.matchOfferId ? posSnap.value.offers.find((o) => o.id === props.matchOfferId) || null : null
+);
+const feeErg = computed(() =>
+  posMarket.value === "ERG" ? matchedOffer.value?.fee ?? 0.005 : 0
+);
 
 const isShares = computed(() => position.value?.kind === "shares");
 const sharesToSellText = ref("100");
@@ -128,18 +132,23 @@ const guardOn = ref(false);
 const guardRatio = ref(150);
 const scrubHeight = ref<number | null>(null);
 
+const shareSupply = computed(() => shareTotalOf(position.value));
+
 const selectedUnits = computed(() => {
   if (!position.value) return 1;
   if (!isShares.value) return 1;
+  const total = shareSupply.value;
   const pct = Number(sharesToSellText.value);
-  const clamped = Number.isFinite(pct) ? Math.max(0.01, Math.min((position.value.units / SHARES_UNITS) * 100, pct)) : (position.value.units / SHARES_UNITS) * 100;
-  return Math.max(1, Math.min(position.value.units, Math.round((clamped / 100) * SHARES_UNITS)));
+  const clamped = Number.isFinite(pct)
+    ? Math.max(0.01, Math.min((position.value.units / total) * 100, pct))
+    : (position.value.units / total) * 100;
+  return Math.max(1, Math.min(position.value.units, Math.round((clamped / 100) * total)));
 });
 
 const faceVal = computed(() => {
   if (!position.value) return 0;
   if (!isShares.value) return position.value.bond.repayment;
-  return position.value.bond.repayment * (selectedUnits.value / SHARES_UNITS);
+  return position.value.bond.repayment * (selectedUnits.value / shareSupply.value);
 });
 
 const costBasis = computed(() => {
@@ -149,7 +158,7 @@ const costBasis = computed(() => {
 });
 
 const remBlocks = computed(() =>
-  position.value ? Math.max(MIN_MATURITY_BLOCKS, position.value.bond.maturity - height.value) : DAY_BLOCKS
+  position.value ? Math.max(1, position.value.bond.maturity - height.value) : DAY_BLOCKS
 );
 
 const expiryHeight = computed(() => {
@@ -177,7 +186,7 @@ watch(
   ([pos, matchId]) => {
     if (!pos) return;
     if (pos.kind === "shares") {
-      sharesToSellText.value = String(Number(((pos.units / SHARES_UNITS) * 100).toFixed(2)));
+      sharesToSellText.value = String(Number(((pos.units / shareTotalOf(pos)) * 100).toFixed(2)));
     }
     const offer = matchId ? posSnap.value.offers.find((o) => o.id === matchId) : null;
     const targetBps =
@@ -302,7 +311,7 @@ const fullOverlay = computed<FullCurveOverlay | null>(() => {
       return Math.max(floorNum.value, priceForYield(face, bps, rem));
     },
     expiry: expiryHeight.value,
-    maxAt: Math.max(expiryHeight.value, position.value.bond.maturity - MIN_MATURITY_BLOCKS),
+    maxAt: Math.max(expiryHeight.value, position.value.bond.maturity - 1),
     face,
     costBasis: costBasis.value,
     color: "var(--sf-cobalt)",

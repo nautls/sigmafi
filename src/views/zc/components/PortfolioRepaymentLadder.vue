@@ -7,7 +7,7 @@ import {
   formatBlocksCompact,
   formatCompact,
   formatMarketAmount,
-  SHARES_UNITS
+  shareTotalOf
 } from "@/utils/zcMath";
 
 const props = defineProps<{
@@ -42,7 +42,7 @@ const buckets = computed(() => {
     const idx = Math.floor((p.bond.maturity - props.height) / STEP);
     if (idx < 0 || idx >= MONTHS) continue;
     if (p.side === "lend") {
-      const frac = p.kind === "shares" ? p.units / SHARES_UNITS : 1;
+      const frac = p.kind === "shares" ? p.units / shareTotalOf(p) : 1;
       list[idx].inflow += (p.bond.repayment || 0) * frac;
       list[idx].inCount += 1;
     } else {

@@ -1,5 +1,5 @@
 import { hex } from "@fleet-sdk/crypto";
-import { decode } from "@fleet-sdk/serializer";
+import { decode, estimateBoxSize } from "@fleet-sdk/serializer";
 import {
   classifyErgoTree,
   marketTokenId,
@@ -13,8 +13,59 @@ export const LONG_MAX = 9_223_372_036_854_775_807n;
 export const LONG_MIN = -9_223_372_036_854_775_808n;
 export const MAX_CURVE_POINTS = 20;
 export const MIN_BOX = 1_000_000n;
+export const MIN_VALUE_PER_BYTE = 360n;
+export const MAX_BOX_SIZE = 4096;
+export const MAX_COLLATERAL_TOKENS = 30;
 export const DISCLOSURE_VAR = "64";
 export const MAX_SCRIPT_CHARS = 8192;
+
+const DUMMY_HEX_64 = "0".repeat(64);
+const DEFAULT_SIZE_HEIGHT = 1_500_000;
+
+export interface BoxSizeInput {
+  readonly value: bigint | string;
+  readonly ergoTree: string;
+  readonly creationHeight?: number;
+  readonly assets: readonly { readonly tokenId: string; readonly amount: bigint | string }[];
+  readonly additionalRegisters: Readonly<Record<string, string | undefined>>;
+}
+
+/**
+ * Exact consensus `ErgoBox` wire size in bytes (matching Appkit's `toDummyInput(ctx).bytes.length`).
+ */
+export function boxCandidateSize(box: BoxSizeInput, index = 0): number {
+  const regs: Record<string, string> = {};
+  for (const k of ["R4", "R5", "R6", "R7", "R8", "R9"] as const) {
+    const v = box.additionalRegisters[k];
+    if (typeof v === "string" && v.length > 0) regs[k] = v;
+  }
+  return estimateBoxSize({
+    boxId: DUMMY_HEX_64,
+    transactionId: DUMMY_HEX_64,
+    index,
+    value: typeof box.value === "bigint" ? box.value.toString() : box.value,
+    ergoTree: box.ergoTree,
+    creationHeight: box.creationHeight ?? DEFAULT_SIZE_HEIGHT,
+    assets: box.assets.map((a) => ({
+      tokenId: a.tokenId,
+      amount: typeof a.amount === "bigint" ? a.amount.toString() : a.amount
+    })),
+    additionalRegisters: regs
+  });
+}
+
+/**
+ * Ergo consensus minimum box value (`max(MIN_BOX, boxSize * 360 nanoERG/byte)`), iterated
+ * once in case raising `value` crosses a VLQ byte-length boundary.
+ */
+export function minBoxValue(box: BoxSizeInput, index = 0): bigint {
+  const cur = typeof box.value === "bigint" ? box.value : BigInt(box.value);
+  const baseVal = cur > MIN_BOX ? cur : MIN_BOX;
+  const firstRaw = BigInt(boxCandidateSize({ ...box, value: baseVal }, index)) * MIN_VALUE_PER_BYTE;
+  const first = firstRaw > MIN_BOX ? firstRaw : MIN_BOX;
+  const secondRaw = BigInt(boxCandidateSize({ ...box, value: first }, index)) * MIN_VALUE_PER_BYTE;
+  return secondRaw > first ? secondRaw : first;
+}
 
 export interface ChainAsset {
   readonly tokenId: string;

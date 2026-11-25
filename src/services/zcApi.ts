@@ -727,6 +727,7 @@ export function adaptAskSummary(raw: any, tokenMap: Record<string, ZcTokenMeta> 
       : null,
     units: Number(raw.units || 1),
     minFill: Number(raw.minFill || 1),
+    shareCount: raw.shares?.shareCount != null ? Number(raw.shares.shareCount) : undefined,
     collateral: bond?.collateral || { erg: 0, usd: 0, tokens: [] },
     bond,
     cov: raw.coverBps != null ? raw.coverBps / 100 : bond?.cov ?? null,
@@ -1218,27 +1219,40 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
     const id = String(t.tokenId || "").toLowerCase();
     if (id === SIGUSD_TOKEN_ID) {
       walletSigUsd += fromRaw(t.amount, 2) ?? 0;
-    } else if (t.kind === "token" || t.kind === "wrapReceipt") {
+    } else if (t.kind === "token" || t.kind === "wrapReceipt" || t.kind === "provision") {
       const meta = tokenMap[id];
       const known = VERIFIED_META_BY_ID.get(id);
       const isReceipt = t.kind === "wrapReceipt" || meta?.kind === "wrapReceipt";
-      const decimals = isReceipt ? 0 : meta?.decimals ?? known?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
+      const isProvision = !isReceipt && t.kind === "provision";
+      const decimals =
+        isReceipt || isProvision
+          ? 0
+          : meta?.decimals ?? known?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
       walletTokens.push({
         id,
         ticker:
           meta?.ticker ||
           meta?.name ||
           known?.name ||
-          (isReceipt ? `ZCS-Wrap-${id.slice(0, 6)}` : id === LIT_TOKEN_ID ? "LIT" : `${id.slice(0, 6)}…`),
+          (isReceipt
+            ? `ZCS-Wrap-${id.slice(0, 6)}`
+            : isProvision
+              ? `LD-NFT-${id.slice(0, 6)}`
+              : id === LIT_TOKEN_ID
+                ? "LIT"
+                : `${id.slice(0, 6)}…`),
         name: meta?.name || known?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
         description: meta?.description ?? null,
         decimals,
-        amount: isReceipt ? Number(t.amount || 1) : fromRaw(t.amount, decimals) ?? 0,
+        amount: isReceipt || isProvision ? Number(t.amount || 1) : fromRaw(t.amount, decimals) ?? 0,
         rawAmount: String(t.amount ?? "0"),
-        kind: isReceipt ? "receipt" : "token",
+        kind: isReceipt ? "receipt" : isProvision ? "provision" : "token",
         wraps: isReceipt ? buildWrappedInfo(meta, tokenMap) : null,
+        pool: t.pool ?? null,
+        liquidity: t.liquidity ?? null,
+        fees: t.fees ?? null,
         verified: isReceipt || !!meta?.verified || !!known,
-        unverified: !isReceipt && !known && meta != null && !meta.verified
+        unverified: !isReceipt && !isProvision && !known && meta != null && !meta.verified
       });
     }
   }
@@ -1786,7 +1800,8 @@ export const zcApi = {
       const m: ZcMarket = l.market === "ERG" ? "ERG" : "SigUSD";
       const items = mapItems(l.items || []);
       const boxErg = fromErg(l.nanoErg) ?? 0;
-      const ergInLot = m === "SigUSD" && boxErg > 0.01 ? Math.max(0, boxErg - 0.005) : 0;
+      // On-chain ZC_Standard_LotAuction transfers the entire box ERG to the buyer on a SigUSD lot sale.
+      const ergInLot = m === "SigUSD" ? boxErg : 0;
       return {
         id: l.boxId,
         boxId: l.boxId,

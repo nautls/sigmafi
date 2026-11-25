@@ -32,7 +32,7 @@ import {
   liquidationPrice,
   pricingName,
   resolvedAskQuote,
-  SHARES_UNITS
+  shareTotalOf
 } from "@/utils/zcMath";
 
 const props = defineProps<{
@@ -60,7 +60,7 @@ function resetForAsk() {
   tab.value = "quote";
   shockPct.value = 0;
   windowPickBlocks.value = null;
-  sharesPct.value = props.ask.kind === "shares" ? (props.ask.units / SHARES_UNITS) * 100 : 100;
+  sharesPct.value = props.ask.kind === "shares" ? (props.ask.units / shareTotalOf(props.ask)) * 100 : 100;
   pathHoverIdx.value = null;
 }
 
@@ -77,16 +77,21 @@ const isWindow = computed(() => props.ask.pricing === "window" && !!props.ask.wi
 const isShares = computed(() => props.ask.kind === "shares");
 const isBuyback = computed(() => !!props.ask.borrowedByMe && props.ask.kind !== "order" && !props.ask.owner);
 
+const askShareTotal = computed(() => shareTotalOf(props.ask));
+
 const maxSharesPct = computed(() =>
-  isShares.value ? Math.max(0.01, (props.ask.units / SHARES_UNITS) * 100) : 100
+  isShares.value ? Math.max(0.01, (props.ask.units / askShareTotal.value) * 100) : 100
 );
 const minSharesPct = computed(() =>
-  isShares.value ? Math.max(0.01, ((props.ask.minFill || 1) / SHARES_UNITS) * 100) : 100
+  isShares.value ? Math.max(0.01, ((props.ask.minFill || 1) / askShareTotal.value) * 100) : 100
 );
 const selectedShareUnits = computed(() => {
   if (!isShares.value) return 1;
   return Math.round(
-    Math.min(props.ask.units, Math.max(props.ask.minFill || 1, (sharesPct.value / 100) * SHARES_UNITS))
+    Math.min(
+      props.ask.units,
+      Math.max(props.ask.minFill || 1, (sharesPct.value / 100) * askShareTotal.value)
+    )
   );
 });
 const shareFrac = computed(() =>
@@ -360,7 +365,7 @@ function openPreview() {
         ? [
             {
               label: "Share lot",
-              value: `${formatNumber((selectedShareUnits.value / SHARES_UNITS) * 100, 2, 0)} / 100 shares`
+              value: `${formatNumber((selectedShareUnits.value / askShareTotal.value) * 100, 2, 0)} / 100 shares`
             }
           ]
         : []),

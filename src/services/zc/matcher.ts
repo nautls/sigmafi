@@ -38,6 +38,8 @@ import {
   liqRuleKind,
   maxBlocks,
   minBlocks,
+  minContinuationErg,
+  minFill,
   minFillBps,
   offerCost,
   offerCurve,
@@ -56,6 +58,7 @@ import {
   spendBudget,
   vaultCurrency,
   windowMaturity,
+  ZcBondTerms,
   ZcOfferState
 } from "./rules";
 import { ZcMarket } from "@/types/zc";
@@ -405,26 +408,21 @@ export class ZcMatcher {
     return this.purchase(s, order.boxId, 1n, 1n, principal, order.repayment, m, fee, ergOut);
   }
 
-  private evaluateAsk(
+  private evaluateAskUnits(
     s: ZcOfferState,
     a: ZcAskSource,
+    bond: ZcBondTerms,
+    units: bigint,
     ignoreYield: boolean
   ): Either<string, ZcMatch> {
-    const bond = bondTermsOf(a.bond.record);
-    const fRef = fillRefusal(a.ask, a.units, this.height);
+    const fRef = fillRefusal(a.ask, units, this.height);
     if (fRef !== null) return left(fRef);
 
-    if (a.shares) {
-      if (!a.mint) return left("the shares' mint is unknown");
-      const sRef = shareRefusal(s.offer, a.mint);
-      if (sRef !== null) return left(sRef);
-    }
-
-    const qRes = askPrice(a.ask, a.units, bond, this.height);
+    const qRes = askPrice(a.ask, units, bond, this.height);
     if (!qRes.ok) return qRes;
     const price = !isTokenOffer(s.offer) ? bigMax(qRes.value, MIN_BOX) : qRes.value;
 
-    const oRef = offerRefusal(s, bond, price, a.units, a.whole, this.oracle, this.height, {
+    const oRef = offerRefusal(s, bond, price, units, a.whole, this.oracle, this.height, {
       shares: a.shares,
       ignoreYield
     });
@@ -440,7 +438,7 @@ export class ZcMatcher {
     return this.purchase(
       s,
       a.boxId,
-      a.units,
+      units,
       a.whole,
       price,
       bond.repayment,
@@ -448,6 +446,68 @@ export class ZcMatcher {
       fee,
       ergOut
     );
+  }
+
+  private askUnitsAffordable(
+    s: ZcOfferState,
+    a: ZcAskSource,
+    bond: ZcBondTerms,
+    units: bigint
+  ): boolean {
+    const qRes = askPrice(a.ask, units, bond, this.height);
+    if (!qRes.ok) return false;
+    const price = !isTokenOffer(s.offer) ? bigMax(qRes.value, MIN_BOX) : qRes.value;
+    if (price > s.capital) return false;
+    const fee = fillFee(s, price);
+    const ergOut =
+      fee + deliveryErgBig(s.offer, a.shares) + (isTokenOffer(s.offer) ? MIN_BOX : price);
+    if (ergOut < 0n || !isValidLong(ergOut)) return false;
+    const minCont = minContinuationErg(s.offer, isTokenOffer(s.offer) ? s.capital - price : 0n);
+    if (!isTokenOffer(s.offer)) {
+      return s.value - ergOut >= minCont;
+    }
+    const orig = originalCapital(s);
+    return (
+      orig > 0n &&
+      ergOut * orig <= spendBudget(s.offer) * price &&
+      s.value - ergOut >= bigMax(minCont, MIN_BOX + batcherFee(s.offer))
+    );
+  }
+
+  private evaluateAsk(
+    s: ZcOfferState,
+    a: ZcAskSource,
+    ignoreYield: boolean
+  ): Either<string, ZcMatch> {
+    const bond = bondTermsOf(a.bond.record);
+
+    if (a.shares) {
+      if (!a.mint) return left("the shares' mint is unknown");
+      const sRef = shareRefusal(s.offer, a.mint);
+      if (sRef !== null) return left(sRef);
+    }
+
+    const fullRes = this.evaluateAskUnits(s, a, bond, a.units, ignoreYield);
+    if (fullRes.ok || !a.shares) return fullRes;
+
+    // Support partial fills on share asks when the offer's remaining capital/ERG cannot
+    // take the entire ask but can take at least `minFill`.
+    const loBound = bigMax(1n, minFill(a.ask));
+    const hiBound = a.ask.token.amount - 1n;
+    if (loBound > hiBound) return fullRes;
+
+    if (!this.askUnitsAffordable(s, a, bond, loBound)) {
+      return fullRes;
+    }
+
+    let lo = loBound;
+    let hi = hiBound;
+    while (lo < hi) {
+      const mid = (lo + hi + 1n) / 2n;
+      if (this.askUnitsAffordable(s, a, bond, mid)) lo = mid;
+      else hi = mid - 1n;
+    }
+    return this.evaluateAskUnits(s, a, bond, lo, ignoreYield);
   }
 
   private purchase(
@@ -462,7 +522,8 @@ export class ZcMatcher {
     ergOut: bigint
   ): Either<string, ZcMatch> {
     if (fee <= MINER_FEE) return left("the batcher reward does not cover a miner fee");
-    if (ergOut < 0n || s.value - ergOut < MIN_BOX) {
+    const minCont = minContinuationErg(s.offer, isTokenOffer(s.offer) ? s.capital - price : 0n);
+    if (ergOut < 0n || s.value - ergOut < minCont) {
       return left("the offer cannot keep a box minimum after this fill");
     }
     const c = offerCost(s, price);
@@ -507,8 +568,10 @@ export class ZcMatcher {
       }
       if (!isTokenOffer(o)) {
         const minDelivery = deliveryErgBig(o, buysShares(o));
-        if (s.value <= batcherFee(o) + MIN_BOX + minDelivery) continue;
+        const minCont = minContinuationErg(o, 0n);
+        if (s.value <= batcherFee(o) + minCont + minDelivery) continue;
       } else {
+        const minCont = minContinuationErg(o, s.capital);
         if (
           originalCapital(s) <= 0n ||
           s.capital <= 0n ||
@@ -518,7 +581,7 @@ export class ZcMatcher {
           rewardBudget(o) >= spendBudget(o) ||
           minFillBps(o) < 100n ||
           minFillBps(o) > 10_000n ||
-          s.value < MIN_BOX + batcherFee(o) + MIN_BATCHING_FEE
+          s.value < bigMax(minCont, MIN_BOX + batcherFee(o)) + MIN_BATCHING_FEE
         ) {
           continue;
         }

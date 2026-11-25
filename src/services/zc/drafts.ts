@@ -2,6 +2,7 @@ import {
   ChainAsset,
   ChainBox,
   LONG_MAX,
+  MAX_COLLATERAL_TOKENS,
   MAX_CURVE_POINTS,
   MIN_BOX,
   ZcAsk,
@@ -34,6 +35,7 @@ import {
   defaultOrderExpiry,
   GRID,
   GUARDED_FIXED_YIELD,
+  isValidLong,
   MAX_ORACLE_AGE,
   MIN_BATCHING_FEE,
   orderedPoints,
@@ -119,12 +121,20 @@ function readPoints(raw: unknown): [bigint, bigint][] {
 
 export function readTokens(raw: unknown): ChainAsset[] {
   if (!Array.isArray(raw)) return [];
+  const seen = new Set<string>();
   return raw.map((item) => {
     const t = asObj(item);
-    if (!t || typeof t.tokenId !== "string" || t.tokenId.trim().length !== 64) {
-      badRequest("each token needs a 64-character tokenId");
+    if (!t || typeof t.tokenId !== "string" || !/^[0-9a-f]{64}$/i.test(t.tokenId.trim())) {
+      badRequest("each token needs a 64-character hex tokenId");
     }
-    return { tokenId: t.tokenId.trim().toLowerCase(), amount: needLong(t, "amount") };
+    const tokenId = t.tokenId.trim().toLowerCase();
+    if (seen.has(tokenId)) {
+      badRequest(`duplicate tokenId ${tokenId.slice(0, 10)}…: list each token once`);
+    }
+    seen.add(tokenId);
+    const amount = needLong(t, "amount");
+    check(amount >= 1n && isValidLong(amount), "each token amount must be a positive 64-bit integer");
+    return { tokenId, amount };
   });
 }
 
@@ -306,14 +316,35 @@ export function buildDraftOffer(d: Obj, h: bigint): ZcOffer {
   let metadata: Uint8Array[] = [];
 
   if (deliveryKind === "selective" || deliveryKind === "dutch") {
+    const shareCount = optLong(delivery, "shareCount") ?? SHARE_COUNT;
+    const pullFee = optLong(delivery, "pullFeeNanoErg") ?? 5_000_000n;
+    const mintFee = optLong(delivery, "mintFeeNanoErg") ?? 5_000_000n;
+    const delOpening = needLong(delivery, "openingBps");
+    const delFloor = needLong(delivery, "floorBps");
+    const delLength = optLong(delivery, "length") ?? 720n;
+    const delExpiry = optLong(delivery, "expiry") ?? bigMax(2160n, delLength);
+    check(shareCount >= 1n && shareCount <= 1_000_000_000n, "delivery.shareCount must be 1 to 1000000000");
+    check(
+      pullFee >= MIN_BATCHING_FEE && mintFee >= MIN_BATCHING_FEE,
+      "delivery pull and mint fees must each be at least 0.002 ERG"
+    );
+    check(
+      delFloor >= 0n && delFloor <= delOpening && delOpening <= 1_000_000n,
+      "delivery auction needs 0 <= floorBps <= openingBps <= 1000000"
+    );
+    check(delLength >= 1n && delLength <= 1_000_000n, "delivery auction length must be 1 to 1000000 blocks");
+    check(
+      delExpiry >= delLength && delExpiry <= 1_000_000n,
+      "delivery auction expiry must be from its length to 1000000 blocks"
+    );
     fractional = [
-      optLong(delivery, "shareCount") ?? SHARE_COUNT,
-      optLong(delivery, "pullFeeNanoErg") ?? 5_000_000n,
-      optLong(delivery, "mintFeeNanoErg") ?? 5_000_000n,
-      needLong(delivery, "openingBps"),
-      needLong(delivery, "floorBps"),
-      optLong(delivery, "length") ?? 720n,
-      optLong(delivery, "expiry") ?? 2160n,
+      shareCount,
+      pullFee,
+      mintFee,
+      delOpening,
+      delFloor,
+      delLength,
+      delExpiry,
       deliveryKind === "dutch" ? LONG_MAX : 100n
     ];
     mintHashHex = getZcScript("DutchAuctionMint", m).treeHash;
@@ -331,18 +362,28 @@ export function buildDraftOffer(d: Obj, h: bigint): ZcOffer {
   if (mToken === null) {
     const ergObj = optObj(d, "erg");
     fee = ergObj ? optLong(ergObj, "batcherFeeNanoErg") ?? 5_000_000n : 5_000_000n;
+    check(fee >= MIN_BATCHING_FEE, "the batcher fee must be at least 0.002 ERG");
+    check(
+      fee < capital - MIN_BOX,
+      "the batcher fee must leave more than 0.001 ERG of capital in the offer box"
+    );
     value = capital;
     assets = [];
     budget = [];
   } else {
     const tObj = optObj(d, "token") ?? {};
     fee = optLong(tObj, "refundFeeNanoErg") ?? 5_000_000n;
+    check(fee >= MIN_BATCHING_FEE, "the refund fee must be at least 0.002 ERG");
     const funding = optLong(tObj, "ergFundingNanoErg") ?? 500_000_000n;
     const minFill = optLong(tObj, "minFillBps") ?? 100n;
     check(minFill >= 100n && minFill <= 10_000n, "minFillBps must be 100 to 10000");
     const reward =
       optLong(tObj, "rewardBudgetNanoErg") ??
       (MIN_BATCHING_FEE * 10_000n + minFill - 1n) / minFill;
+    check(
+      funding > MIN_BOX + fee,
+      "the ERG funding must exceed the box minimum plus the refund fee"
+    );
     const spend = funding - MIN_BOX - fee;
     check(
       reward > 0n && spend > reward,
@@ -352,8 +393,6 @@ export function buildDraftOffer(d: Obj, h: bigint): ZcOffer {
     assets = [{ tokenId: mToken, amount: capital }];
     budget = [capital, spend, minFill, reward];
   }
-
-  check(fee >= MIN_BATCHING_FEE, "the batcher fee must be at least 0.002 ERG");
 
   const terms: bigint[] = [
     minYield,
@@ -588,10 +627,18 @@ export function buildDraftOrder(d: Obj, h: bigint): ZcOrder {
     badRequest(`pricing must be fixed, yield or window, not ${pricing}`);
   }
 
+  const colTokens = readTokens(col.tokens);
+  check(
+    colTokens.length <= MAX_COLLATERAL_TOKENS,
+    `a borrow order accepts at most ${MAX_COLLATERAL_TOKENS} distinct collateral tokens so liquidated share vaults stay under the 4,096-byte consensus limit`
+  );
+  const totalBoxErg = colErg + expiryFee;
+  check(isValidLong(totalBoxErg), "collateral nanoErg plus expiry fee overflows");
+
   const script = getZcScript(kind, m);
   return {
     recordType: "order",
-    box: draftBox(kind, m, colErg + expiryFee, readTokens(col.tokens), h),
+    box: draftBox(kind, m, totalBoxErg, colTokens, h),
     script,
     boxId: DRAFT_ID,
     namedHash: "",
@@ -695,10 +742,17 @@ export function buildDraftAsk(d: Obj, matcher: ZcMatcher): ZcAsk {
   const expiry = optLong(d, "expiry") ?? h + 5040n;
   check(expiry > h + 1n, "the expiry must be above the current height");
   const minF = optLong(d, "minFill") ?? 1n;
+  check(minF >= 1n && minF <= units, "minFill must be between 1 and units");
   const guardObj = optObj(d, "saleGuard");
   const guard: [bigint, bigint] | null = guardObj
     ? [needLong(guardObj, "ratioBps"), optLong(guardObj, "oracleAge") ?? 30n]
     : null;
+  if (guard !== null) {
+    check(
+      guard[0] > 0n && guard[1] >= 1n && guard[1] <= MAX_ORACLE_AGE,
+      "saleGuard needs a positive ratioBps and oracleAge from 1 to 100000"
+    );
+  }
 
   const p = optObj(d, "pricing");
   if (!p) badRequest("pricing is required");
@@ -708,13 +762,17 @@ export function buildDraftAsk(d: Obj, matcher: ZcMatcher): ZcAsk {
   let pricingHash: string | null;
 
   if (p.kind === "fixed" && guard === null) {
+    const fixedPrice = needLong(p, "price");
+    check(fixedPrice > 0n && isValidLong(fixedPrice), "fixed ask price must be positive");
     kind = "SaleOrder";
-    terms = [needLong(p, "price"), units, minF, expiry];
+    terms = [fixedPrice, units, minF, expiry];
     pricingHash = null;
   } else if (p.kind === "fixed" && guard !== null) {
+    const fixedPrice = needLong(p, "price");
+    check(fixedPrice > 0n && isValidLong(fixedPrice), "fixed ask price must be positive");
     kind = "PricedAsk";
     terms = [
-      needLong(p, "price"),
+      fixedPrice,
       units,
       minF,
       expiry,

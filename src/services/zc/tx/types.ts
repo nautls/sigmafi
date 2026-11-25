@@ -189,6 +189,8 @@ export interface ZcTxReadContext {
 export interface ZcTxDeps {
   readonly wallet: ZcWalletTxAdapter;
   getReadContext(force?: boolean, signal?: AbortSignal): Promise<ZcTxReadContext>;
+  /** Optional predicate identifying raw capability / LithosDex provision NFTs that must be wrapped first. */
+  isCapabilityToken?(tokenId: string): boolean;
 }
 
 /** Action refused by protocol rules or wallet constraints (e.g., expired, missing auth box, pull required). */

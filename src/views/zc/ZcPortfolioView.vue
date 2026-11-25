@@ -45,7 +45,7 @@ import {
   positionPnl,
   pricingName,
   resolvedAskQuote,
-  SHARES_UNITS,
+  shareTotalOf,
   signedFormat
 } from "@/utils/zcMath";
 
@@ -166,7 +166,7 @@ const lentAmts = computed<Record<ZcMarket, number>>(() => {
   const out: Record<ZcMarket, number> = { SigUSD: 0, ERG: 0 };
   for (const p of lendPositions.value) {
     if (p.status !== "live") continue;
-    const frac = p.kind === "shares" ? p.units / SHARES_UNITS : 1;
+    const frac = p.kind === "shares" ? p.units / shareTotalOf(p) : 1;
     out[p.bond.market] += (p.bond.repayment || 0) * frac;
   }
   return out;
@@ -333,14 +333,14 @@ function previewClaim(p: ZcPortfolioPosition, unfrac = false) {
     heroValue: unfrac
       ? "1 whole bond unit"
       : formatMarketAmount(
-          b.repayment * (p.kind === "shares" ? p.units / SHARES_UNITS : 1),
+          b.repayment * (p.kind === "shares" ? p.units / shareTotalOf(p) : 1),
           b.market
         ),
     heroSub: `Bond ${shortenString(b.id, 14)}`,
     rows: [
       { label: "Token", value: shortenString(tokId, 14) },
       ...(p.kind === "shares"
-        ? [{ label: "Shares", value: `${formatNumber((p.units / SHARES_UNITS) * 100, 2, 0)}%` }]
+        ? [{ label: "Shares", value: `${formatNumber((p.units / shareTotalOf(p)) * 100, 2, 0)}%` }]
         : [])
     ],
     rawSummary: {
@@ -421,12 +421,12 @@ function previewRunMint(label: string, boxId: string) {
 function previewWrapNft(t: ZcWalletToken) {
   previewPayload.value = {
     title: "Wrap NFT into Custody Receipt",
-    subtitle: "Locks NFT in custody vault & mints ZCS-Wrap receipt (0.03 ERG refundable reserve)",
+    subtitle: "Locks NFT in custody vault & mints ZCS-Wrap receipt (0.03 ERG refundable reserve; decreases if refreshed after 4+ yrs)",
     badge: "Custody Wrap",
     tone: "cobalt",
     heroLabel: "Wrapping cost",
-    heroValue: "0.036 ERG",
-    heroSub: t.name || t.ticker,
+    heroValue: "0.037 ERG",
+    heroSub: `${t.name || t.ticker} · 0.038 ERG incl. miner fee`,
     rows: [
       { label: "Token", value: shortenString(t.id, 14) },
       { label: "Receipt", value: `ZCS-Wrap-${t.id.slice(0, 6)}` }
@@ -841,7 +841,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
                     <span class="truncate text-[13.5px] font-bold text-[color:var(--sf-ink)] group-hover:text-[color:var(--sf-cobalt)]">
                       {{
                         p.kind === "shares"
-                          ? `${formatNumber((p.units / SHARES_UNITS) * 100, 1, 0)} shares · ${p.bond.market}`
+                          ? `${formatNumber((p.units / shareTotalOf(p)) * 100, 1, 0)} shares · ${p.bond.market}`
                           : `${p.bond.market} Bond`
                       }}
                     </span>
@@ -938,7 +938,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
                   Extinguish
                 </button>
                 <button
-                  v-if="p.kind === 'shares' && p.units >= SHARES_UNITS && p.status === 'live'"
+                  v-if="p.kind === 'shares' && p.units >= shareTotalOf(p) && p.status === 'live'"
                   type="button"
                   class="sf-btn-outline h-7 rounded-lg px-2.5 text-[11px]"
                   @click="previewClaim(p, true)"

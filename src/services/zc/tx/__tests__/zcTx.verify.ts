@@ -20,37 +20,62 @@ import { Amount, Box, EIP12UnsignedTransaction, Network, SignedTransaction } fro
 import { ErgoAddress } from "@fleet-sdk/core";
 import { blake2b256, hex } from "@fleet-sdk/crypto";
 import {
+  boxCandidateSize,
   ChainAsset,
   ChainBox,
   disclosedTrees,
+  LONG_MAX,
+  MAX_BOX_SIZE,
+  MAX_COLLATERAL_TOKENS,
   MIN_BOX,
+  minBoxValue,
   readZcBox,
+  ZcAsk,
   ZcEntry,
   ZcOffer,
   ZcOracle,
-  ZcOrder
+  ZcOrder,
+  ZcShareVault,
+  ZcWrapVault
 } from "../../boxes";
-import { ChainTransaction, ZcChainClient } from "../../chainClient";
+import { ChainTransaction, GraphqlTokenInfo, ZcChainClient } from "../../chainClient";
 import {
   getZcExpressionHash,
+  getZcScript,
   ZC_EXPRESSIONS,
   ZC_ORACLE_V2_ERGO_TREE,
   ZC_ORACLE_V2_NFT,
+  ZC_PINNED_COMMIT,
+  ZC_SCRIPTS,
   ZC_SIGUSD_TOKEN_ID
 } from "../../contracts";
-import { buildDraftOrder } from "../../drafts";
-import { buildMarketBook, ZcMatcher } from "../../matcher";
+import { buildDraftOffer, buildDraftOrder } from "../../drafts";
+import { buildMarketBook, openOf, ZcMatcher } from "../../matcher";
 import { ZcResolver } from "../../resolver";
-import { orderRefusal } from "../../rules";
+import {
+  belowOwnRatio,
+  lotTarget,
+  offerRefusal,
+  offerStateOf,
+  orderRefusal,
+  windowMaturity
+} from "../../rules";
 import {
   applyScriptDisclosure,
   assertTxInvariants,
   bondMetadata,
+  buildBuyFromVaultSpend,
+  buildClaimSharesSpend,
   buildFillOrderSpend,
   buildOrderOutput,
+  buildUnwrapSpend,
   buildZcAction,
+  encodeByte,
+  encodeHexBytes,
   encodeInt,
   encodeLong,
+  encodeLongs,
+  encodeUtf8,
   hashErgoTreeHex,
   indexWalletAddresses,
   NautilusSignOptions,
@@ -201,6 +226,7 @@ interface MockHarness {
   readonly deps: ZcTxDeps;
   readonly boxes: Map<string, ChainBox>;
   readonly txs: Map<string, ChainTransaction>;
+  readonly tokens: Map<string, GraphqlTokenInfo>;
   readonly entries: Map<string, ZcEntry>;
   readonly walletUtxos: ChainBox[];
   readonly signedCalls: { tx: EIP12UnsignedTransaction; options?: NautilusSignOptions }[];
@@ -214,6 +240,7 @@ interface MockHarness {
 function createHarness(): MockHarness {
   const boxes = new Map<string, ChainBox>();
   const txs = new Map<string, ChainTransaction>();
+  const tokens = new Map<string, GraphqlTokenInfo>();
   const entries = new Map<string, ZcEntry>();
   const walletUtxos: ChainBox[] = [];
   const signedCalls: { tx: EIP12UnsignedTransaction; options?: NautilusSignOptions }[] = [];
@@ -222,6 +249,7 @@ function createHarness(): MockHarness {
     deps: null as unknown as ZcTxDeps,
     boxes,
     txs,
+    tokens,
     entries,
     walletUtxos,
     signedCalls,
@@ -290,8 +318,14 @@ function createHarness(): MockHarness {
       }
       return out;
     },
-    async fetchTokensByIds() {
-      return new Map();
+    async fetchTokensByIds(ids: readonly string[]) {
+      const out = new Map<string, GraphqlTokenInfo>();
+      for (const raw of ids) {
+        const id = raw.toLowerCase();
+        const found = tokens.get(id);
+        if (found) out.set(id, found);
+      }
+      return out;
     },
     async fetchTransactionsByAddresses() {
       return [];
@@ -446,8 +480,8 @@ async function runAll(): Promise<void> {
     assert.equal(wrapMeta[2], "0");
   });
 
-  // 3. Script disclosure var 64
-  await test("3. Script disclosure var 64 attaches iff named script is absent from inputs & outputs", () => {
+  // 3. Script disclosure var 64 (I-8: outputs-only check so exact-ERG mempool txs stay resolvable)
+  await test("3. Script disclosure var 64 attaches iff named script is absent from outputs (I-8)", () => {
     const inpB = {
       boxId: hexId(1),
       transactionId: hexId(2),
@@ -471,9 +505,19 @@ async function runAll(): Promise<void> {
     assert.ok(disclosed[0].extension[64], "Expected var 64 on INPUTS(0)");
     assert.deepEqual(disclosedTrees(disclosed[0].extension[64]!), [TREE_A]);
 
+    // Even when TREE_A is in inputs, outputs lack TREE_A -> var 64 MUST still be attached!
     const inpA = { ...inpB, ergoTree: TREE_A };
-    const omitted = applyScriptDisclosure([inpA], [outB], TREE_A);
-    assert.equal(omitted[0].extension[64], undefined, "var 64 should be omitted when already present");
+    const disclosedExact = applyScriptDisclosure([inpA], [outB], TREE_A);
+    assert.ok(
+      disclosedExact[0].extension[64],
+      "var 64 MUST be attached when named tree appears only in inputs (exact-ERG mempool disclosure)"
+    );
+    assert.deepEqual(disclosedTrees(disclosedExact[0].extension[64]!), [TREE_A]);
+
+    // When TREE_A appears in outputs, var 64 is omitted
+    const outA = { ...outB, ergoTree: TREE_A };
+    const omitted = applyScriptDisclosure([inpB], [outA], TREE_A);
+    assert.equal(omitted[0].extension[64], undefined, "var 64 should be omitted when present in outputs");
   });
 
   // 4-22. All 19 ZcTxActions end-to-end (quote + build + Nautilus v3 signers + readZcBox round-trip)
@@ -1099,6 +1143,694 @@ async function runAll(): Promise<void> {
           limits: { maxPay: 1_000_000n }
         }),
       ZcTxConflictError
+    );
+  });
+
+  // 16. FS-2: Pinned WrapMint contract & blake2b256 verification of all 22 ZC_SCRIPTS
+  await test("16. [FS-2] WrapMint pinned to adce8ac (466 B) and all 22 ZC_SCRIPTS match their treeHash", () => {
+    assert.equal(ZC_PINNED_COMMIT, "adce8ac");
+    const wrapMint = getZcScript("WrapMint", null);
+    assert.equal(wrapMint.ergoTreeHex.length / 2, 466, "WrapMint ErgoTree must be 466 bytes");
+    assert.equal(
+      wrapMint.treeHash,
+      "95dd499a9ea4c10c14ce474a5ee916f60236b1eec379ae04f170d22b2a651a47"
+    );
+    assert.equal(
+      wrapMint.templateHash,
+      "9972a876f976da80074b4e0d81fc4cc1b731df11ca5f0128f8d072883b48dcba"
+    );
+    assert.equal(ZC_SCRIPTS.length, 22);
+    for (const s of ZC_SCRIPTS) {
+      const actual = hex.encode(blake2b256(hex.decode(s.ergoTreeHex)));
+      assert.equal(actual, s.treeHash, `Tree hash mismatch for ${s.label}`);
+    }
+  });
+
+  // 17. FS-5 & FS-3: Partial claimShares minBoxValue floor + trailing spam register stripping
+  await test("17. [FS-5 & FS-3] Partial claimShares tops up low-ERG vault & strips trailing spam registers", () => {
+    const shareId = hexId(0x91);
+    const bondId = hexId(0x92);
+    const spamReg = encodeUtf8("spam-register-payload");
+
+    // Low-ERG SigUSD DutchAuctionVault (state 2 = claimable) holding 2_000_000 nanoERG + 1000 SigUSD
+    // plus an injected trailing spam register R9.
+    const dutchVaultBox = makeChainBox({
+      id: hexId(0x93),
+      ergoTree: getZcScript("DutchAuctionVault", null).ergoTreeHex,
+      value: 2_000_000n,
+      assets: [
+        { tokenId: shareId, amount: 100_000_001n },
+        { tokenId: ZC_SIGUSD_TOKEN_ID, amount: 1_000n }
+      ],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(bondId),
+        encodeLongs([100_000_000n, 100_000_000n, 5_000_000n]),
+        encodeByte(2),
+        encodeLongs([1_000n, 20_000n, 9_000n, 720n, 2160n, LONG_MAX, BigInt(HEIGHT - 5000)]),
+        encodeHexBytes(ZC_SIGUSD_TOKEN_ID),
+        spamReg // R9 spam register
+      ])
+    });
+    const vaultRec = readZcBox(dutchVaultBox) as ZcShareVault;
+    assert.ok(vaultRec && vaultRec.recordType === "shareVault" && vaultRec.dutch);
+
+    // Claiming 75% leaves raw 500_000 nanoERG < MIN_BOX; FS-5 floors continuation at >= minBoxValue
+    const partialSpend = buildClaimSharesSpend({
+      vault: vaultRec,
+      vaultBox: dutchVaultBox,
+      burned: 75_000_000n,
+      toTree: TREE_A
+    });
+    const contOut = partialSpend.outputs[1];
+    assert.ok(
+      contOut.value >= minBoxValue(contOut),
+      `Continuation vault value ${contOut.value} must be >= minBoxValue ${minBoxValue(contOut)}`
+    );
+    assert.ok(contOut.value >= MIN_BOX, "Continuation vault value must be >= MIN_BOX");
+    // FS-3: R9 spam register must be stripped
+    assert.equal(contOut.additionalRegisters.R9, undefined, "Trailing R9 spam must be stripped on claimShares");
+    assert.ok(contOut.additionalRegisters.R8, "Protocol R8 currency register must be preserved");
+
+    // FS-3 on buildBuyFromVaultSpend: open Dutch auction (state 1) with spam R9
+    const openAuctionBox = makeChainBox({
+      id: hexId(0x94),
+      ergoTree: getZcScript("DutchAuctionVault", null).ergoTreeHex,
+      value: 2_000_000n,
+      assets: [
+        { tokenId: shareId, amount: 100_000_001n },
+        { tokenId: NFT_ID, amount: 1n }
+      ],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(bondId),
+        encodeLongs([100_000_000n, 100_000_000n, 5_000_000n]),
+        encodeByte(1),
+        encodeLongs([1_000n, 20_000n, 9_000n, 720n, 2160n, LONG_MAX, BigInt(HEIGHT - 10)]),
+        encodeHexBytes(ZC_SIGUSD_TOKEN_ID),
+        spamReg
+      ])
+    });
+    const openVaultRec = readZcBox(openAuctionBox) as ZcShareVault;
+    const buySpend = buildBuyFromVaultSpend({
+      vault: openVaultRec,
+      vaultBox: openAuctionBox,
+      height: BigInt(HEIGHT)
+    });
+    assert.equal(
+      buySpend.outputs[0].additionalRegisters.R9,
+      undefined,
+      "Trailing R9 spam must be stripped on buyFromVault"
+    );
+    assert.ok(buySpend.outputs[0].value >= minBoxValue(buySpend.outputs[0]));
+  });
+
+  // 18. FS-4: Dynamic 360 nanoERG/byte minBoxValue, 4096 B cap, 30-token cap, 4 KB offer check
+  await test("18. [FS-4] Dynamic minBoxValue (360 nanoERG/B), 4096 B max size, 30-token cap, & 4 KB offer check", async () => {
+    const walletBook = indexWalletAddresses(
+      { changeAddress: ADDR_A, usedAddresses: [ADDR_A], unusedAddresses: [] },
+      Network.Mainnet
+    );
+
+    // Build an output > 2,777 B (30 tokens inside a DutchAuctionVault = ~3,500 B -> needs > 1.25M nanoERG)
+    const manyTokens: ChainAsset[] = Array.from({ length: 30 }, (_, i) => ({
+      tokenId: hexId(0xa0 + i),
+      amount: 10n
+    }));
+    const bigBox = {
+      ergoTree: getZcScript("DutchAuctionVault", null).ergoTreeHex,
+      creationHeight: HEIGHT,
+      value: MIN_BOX.toString(),
+      assets: manyTokens.map((t) => ({ tokenId: t.tokenId, amount: t.amount.toString() })),
+      additionalRegisters: {}
+    };
+    const sz = boxCandidateSize(bigBox, 0);
+    assert.ok(sz > 2777 && sz <= MAX_BOX_SIZE, `Expected 2777 < size (${sz}) <= 4096`);
+    const reqMin = minBoxValue(bigBox, 0);
+    assert.ok(reqMin > MIN_BOX, `Expected dynamic minBoxValue (${reqMin}) > MIN_BOX`);
+
+    const feeBox = {
+      ergoTree: getZcScript("BondVault", null).ergoTreeHex, // dummy replaced below
+      creationHeight: HEIGHT,
+      value: TX_FEE.toString(),
+      assets: [],
+      additionalRegisters: {}
+    };
+    const dummyInput = {
+      boxId: hexId(0xd1),
+      transactionId: hexId(0xd2),
+      index: 0,
+      ergoTree: TREE_A,
+      creationHeight: HEIGHT - 10,
+      value: (MIN_BOX + TX_FEE).toString(),
+      assets: manyTokens.map((t) => ({ tokenId: t.tokenId, amount: t.amount.toString() })),
+      additionalRegisters: {},
+      extension: {}
+    };
+    // assertTxInvariants MUST reject MIN_BOX on a >2777 B output
+    assert.throws(
+      () =>
+        assertTxInvariants({
+          unsignedTx: {
+            inputs: [dummyInput],
+            dataInputs: [],
+            outputs: [bigBox, feeBox]
+          },
+          signers: { 0: ADDR_A },
+          protocolIndices: new Set(),
+          walletOutputIndices: new Set(),
+          walletBook,
+          expectedMinted: null,
+          expectedBurn: [],
+          market: null
+        }),
+      ZcTxInvariantError
+    );
+
+    // 31 distinct collateral tokens MUST be refused by buildDraftOrder & createOrder
+    const tooManyTokens = Array.from({ length: MAX_COLLATERAL_TOKENS + 1 }, (_, i) => ({
+      tokenId: hexId(0x40 + i),
+      amount: "1"
+    }));
+    const q31 = await quoteZcAction(
+      {
+        type: "createOrder",
+        body: {
+          market: "ERG",
+          pricing: "fixed",
+          principal: (1n * ERG).toString(),
+          repayment: (11n * ERG / 10n).toString(),
+          timing: { mode: "fixed", maturity: HEIGHT + 50_000, exact: true },
+          collateral: { nanoErg: (2n * ERG).toString(), tokens: tooManyTokens },
+          rule: { kind: "oracle", ratioBps: 15_000 }
+        }
+      },
+      h.deps
+    );
+    assert.ok(q31.refusals.length > 0, "Expected 31-token order to be refused");
+
+    // 31-token bond MUST also be refused by offerRefusal when offer delivers shares
+    const offerDraft = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (5n * ERG).toString(),
+        minYieldBps: 500,
+        floorBps: 12_000,
+        delivery: { kind: "selective", openingBps: 10_000, floorBps: 9_000 }
+      },
+      BigInt(HEIGHT)
+    );
+    const fakeOracle: ZcOracle = {
+      box: makeChainBox({
+        id: hexId(0x99),
+        ergoTree: ZC_ORACLE_V2_ERGO_TREE,
+        value: 10_000_000n,
+        creationHeight: HEIGHT - 5
+      }),
+      price: 1_000_000_000n,
+      epoch: 100
+    };
+    const bigBondRefusal = offerRefusal(
+      offerStateOf(offerDraft),
+      {
+        market: "ERG",
+        repayment: 11n * ERG / 10n,
+        principalErg: 1n * ERG,
+        payload: [15_000n, 60n],
+        liqHash: getZcExpressionHash("OracleLiquidation", "ERG"),
+        collateralErg: 3n * ERG,
+        collateral: Array.from({ length: MAX_COLLATERAL_TOKENS + 1 }, (_, i) => ({
+          tokenId: hexId(0x40 + i),
+          amount: 1n
+        })),
+        start: BigInt(HEIGHT),
+        maturity: BigInt(HEIGHT + 50_000)
+      },
+      1n * ERG,
+      1n,
+      1n,
+      fakeOracle,
+      BigInt(HEIGHT),
+      { primary: true }
+    );
+    assert.ok(
+      bigBondRefusal && bigBondRefusal.includes("30"),
+      `Expected 30-token offerRefusal, got: ${String(bigBondRefusal)}`
+    );
+  });
+
+  // 19. I-8: Exact-ERG posting & exact-ERG recollateralize both emit var 64 disclosure
+  await test("19. [I-8] Exact-ERG posting & exact-ERG recollateralize attach var 64 on INPUTS(0)", async () => {
+    const exactH = createHarness();
+    // Exact UTXO matching wrap box (37_000_000) + TX_FEE (1_000_000) = 38_000_000 nanoERG (zero change output!)
+    exactH.walletUtxos.push(
+      makeChainBox({
+        id: hexId(0xe1),
+        ergoTree: TREE_A,
+        value: 38_000_000n,
+        assets: [{ tokenId: NFT_ID, amount: 1n }]
+      })
+    );
+    const wrapBuilt = await buildZcAction(
+      { type: "createWrap", body: { tokenId: NFT_ID } },
+      exactH.deps
+    );
+    assert.equal(wrapBuilt.unsignedTx.outputs.length, 2, "Exact-ERG post should have no change output");
+    assert.ok(
+      wrapBuilt.unsignedTx.inputs[0].extension[64],
+      "Exact-ERG post MUST attach var 64 disclosure on INPUTS(0)"
+    );
+    assert.deepEqual(disclosedTrees(wrapBuilt.unsignedTx.inputs[0].extension[64]!), [TREE_A]);
+
+    // Exact-ERG recollateralize: auth box holds exact 1 ERG + TX_FEE (no change output)
+    exactH.registerRecord(ownBondBox);
+    exactH.walletUtxos.length = 0;
+    exactH.walletUtxos.push(
+      makeChainBox({
+        id: hexId(0xe2),
+        ergoTree: TREE_A,
+        value: 1n * ERG + TX_FEE
+      })
+    );
+    const recollBuilt = await buildZcAction(
+      { type: "recollateralize", assetId: OWN_BOND_ASSET, nanoErg: 1n * ERG },
+      exactH.deps
+    );
+    assert.equal(recollBuilt.unsignedTx.outputs.length, 2, "Exact-ERG recollateralize has bond + fee only");
+    assert.ok(
+      recollBuilt.unsignedTx.inputs[0].extension[3],
+      "Bond input extension[3] must remain intact"
+    );
+    assert.ok(
+      recollBuilt.unsignedTx.inputs[0].extension[64],
+      "Exact-ERG recollateralize MUST attach var 64 disclosure on INPUTS(0)"
+    );
+    assert.deepEqual(disclosedTrees(recollBuilt.unsignedTx.inputs[0].extension[64]!), [TREE_A]);
+  });
+
+  // 20. SF-1: Raw LithosDex provision NFT blocked in createLot & createOrder
+  await test("20. [SF-1] Raw LithosDex provision / capability NFT refused in createLot & createOrder", async () => {
+    const PROV_NFT = hexId(0x79);
+    h.tokens.set(PROV_NFT, {
+      tokenId: PROV_NFT,
+      name: "LithosDex Provision LD-NFT",
+      description: "LP capability token",
+      decimals: 0,
+      emissionAmount: "1"
+    });
+    h.walletUtxos.push(
+      makeChainBox({
+        id: hexId(0x09),
+        ergoTree: TREE_A,
+        value: MIN_BOX,
+        assets: [{ tokenId: PROV_NFT, amount: 1n }]
+      })
+    );
+    const lotQ = await quoteZcAction(
+      {
+        type: "createLot",
+        body: {
+          market: "ERG",
+          items: [{ tokenId: PROV_NFT, amount: "1" }],
+          opening: (5n * ERG).toString(),
+          floor: (2n * ERG).toString(),
+          start: HEIGHT,
+          end: HEIGHT + 720,
+          expiry: HEIGHT + 2160
+        }
+      },
+      h.deps
+    );
+    assert.ok(lotQ.refusals.length > 0, "Raw provision NFT must be refused in createLot");
+    assert.deepEqual(lotQ.requires, ["wrap"]);
+
+    const ordQ = await quoteZcAction(
+      {
+        type: "createOrder",
+        body: {
+          market: "ERG",
+          pricing: "fixed",
+          principal: (1n * ERG).toString(),
+          repayment: (11n * ERG / 10n).toString(),
+          timing: { mode: "fixed", maturity: HEIGHT + 50_000, exact: true },
+          collateral: {
+            nanoErg: (3n * ERG).toString(),
+            tokens: [{ tokenId: PROV_NFT, amount: "1" }]
+          },
+          rule: { kind: "oracle", ratioBps: 15_000 }
+        }
+      },
+      h.deps
+    );
+    assert.ok(ordQ.refusals.length > 0, "Raw provision NFT must be refused in createOrder");
+    assert.deepEqual(ordQ.requires, ["wrap"]);
+  });
+
+  // 21. Engine audit parity: I-1, I-4, I-5, I-6, I-7, R-1, R-4, I-10, FS-1, I-3, FS-7
+  await test("21. [I-1/I-4/I-5/I-6/I-7/R-1/R-4/I-10/FS-1/I-3/FS-7] Mirrored ZC engine audit parity", async () => {
+    const fakeOracle: ZcOracle = {
+      box: makeChainBox({
+        id: hexId(0x99),
+        ergoTree: ZC_ORACLE_V2_ERGO_TREE,
+        value: 10_000_000n,
+        creationHeight: HEIGHT - 5
+      }),
+      price: 1_000_000_000n,
+      epoch: 100
+    };
+
+    // I-1: ERG offer that covers price (1 ERG) but cannot cover price + batcherFee + delivery + reserve + continuation
+    const tightOffer = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (1_020_000_000n).toString(), // 1.02 ERG — cannot pay 1 ERG + 0.005 fee + 0.001 del + 0.05 reserve + >0.001 cont
+        minYieldBps: 100,
+        floorBps: 12_000
+      },
+      BigInt(HEIGHT)
+    );
+    const bondTerms = {
+      market: "ERG" as const,
+      repayment: 12n * ERG / 10n,
+      principalErg: 1n * ERG,
+      payload: [15_000n, 60n],
+      liqHash: getZcExpressionHash("OracleLiquidation", "ERG"),
+      collateralErg: 3n * ERG,
+      collateral: [],
+      start: BigInt(HEIGHT),
+      maturity: BigInt(HEIGHT + 50_000)
+    };
+    const i1Ref = offerRefusal(
+      offerStateOf(tightOffer),
+      bondTerms,
+      1n * ERG,
+      1n,
+      1n,
+      fakeOracle,
+      BigInt(HEIGHT),
+      { primary: true }
+    );
+    assert.ok(i1Ref && i1Ref.includes("continuation"), `Expected I-1 refusal, got: ${String(i1Ref)}`);
+
+    // I-1 secondary ask: ERG secondary ask with price=1 ERG on 1.005 ERG offer must also be refused
+    const tightSecOffer = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (1_006_000_000n).toString(),
+        minYieldBps: 100,
+        floorBps: 12_000
+      },
+      BigInt(HEIGHT)
+    );
+    const i1SecRef = offerRefusal(
+      offerStateOf(tightSecOffer),
+      bondTerms,
+      1n * ERG,
+      1n,
+      1n,
+      fakeOracle,
+      BigInt(HEIGHT),
+      { primary: false }
+    );
+    assert.ok(i1SecRef && i1SecRef.includes("continuation"), `Expected I-1 secondary refusal, got: ${String(i1SecRef)}`);
+
+    // I-4: belowOwnRatio uses OracleLiquidation's market, not bond.market
+    // SigUSD bond with ERG collateral (2 ERG) and SigUSD repayment (100 = $1) carrying ERG OracleLiquidation hash:
+    // At price = 2e9 nanoERG/USD ($0.50/ERG), ERG-denominated cover treats repayment as 100 nanoERG (huge) while
+    // SigUSD-denominated cover treats collateral as 2 ERG = $1 (100% < 150%).
+    const crossRuleBond = {
+      market: "SigUSD" as const,
+      repayment: 100n,
+      principalErg: 0n,
+      payload: [15_000n, 60n],
+      liqHash: getZcExpressionHash("OracleLiquidation", "ERG"),
+      collateralErg: 2n * ERG,
+      collateral: [],
+      start: BigInt(HEIGHT),
+      maturity: BigInt(HEIGHT + 50_000)
+    };
+    assert.equal(
+      belowOwnRatio(crossRuleBond, 2_000_000_000n),
+      false,
+      "I-4: ERG oracle rule must measure cover in ERG market, not SigUSD market"
+    );
+
+    // I-5: orderRefusal checks chosen maturity for window orders
+    const winOrder = buildDraftOrder(
+      {
+        market: "ERG",
+        pricing: "window",
+        principal: (1n * ERG).toString(),
+        repayment: (12n * ERG / 10n).toString(),
+        timing: { mode: "window", minDuration: 1000, maxDuration: 50_000 },
+        curve: { capBps: 1500, points: [{ blocks: 10_000, bps: 900 }] },
+        collateral: { nanoErg: (3n * ERG).toString() },
+        rule: { kind: "oracle", ratioBps: 15_000 }
+      },
+      BigInt(HEIGHT)
+    );
+    assert.equal(orderRefusal(winOrder, BigInt(HEIGHT), BigInt(HEIGHT + 5000)), null);
+    assert.ok(
+      orderRefusal(winOrder, BigInt(HEIGHT), BigInt(HEIGHT + 500)) !== null,
+      "I-5: out-of-window chosen maturity must be refused by orderRefusal"
+    );
+
+    // I-6: 3-block inclusion slack refuses bond at exactly minBlocks from height+1
+    const slackOffer = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (5n * ERG).toString(),
+        minYieldBps: 100,
+        floorBps: 12_000,
+        minBlocks: 1000
+      },
+      BigInt(HEIGHT)
+    );
+    const tightMatBond = { ...bondTerms, maturity: BigInt(HEIGHT + 1 + 1000) };
+    const i6Ref = offerRefusal(
+      offerStateOf(slackOffer),
+      tightMatBond,
+      1n * ERG,
+      1n,
+      1n,
+      fakeOracle,
+      BigInt(HEIGHT),
+      { primary: true }
+    );
+    assert.ok(i6Ref && i6Ref.includes("outside"), `Expected I-6 slack refusal, got: ${String(i6Ref)}`);
+
+    // R-1: lotTarget returns null on 64-bit overflow
+    const overflowVault = {
+      recordType: "shareVault",
+      auction: [LONG_MAX, 1_000_000n, 1_000_000n, 720n, 2160n, LONG_MAX, BigInt(HEIGHT)]
+    } as unknown as ZcShareVault;
+    assert.equal(lotTarget(overflowVault, BigInt(HEIGHT)), null, "R-1: lotTarget must return null on overflow");
+
+    // R-4: interior ERG concave peak found by windowMaturity between curve breakpoints.
+    // Window [1000, 12_000] from HEIGHT=1_650_000 contains zero 21_600-block grid points.
+    // Borrow curve flat 2000 bps; offer demands 1200 bps at 1000 -> 1900 bps at 12_000 with
+    // 0.01 ERG batcher fee on a 10 ERG loan. Both endpoints fail (1000 has negative net yield
+    // from fee drag; 12_000 yields ~1780 bps < 1900 bps), while interior durations around ~6500
+    // clear the offer curve (~1580 bps > 1550 bps).
+    const peakOrder = buildDraftOrder(
+      {
+        market: "ERG",
+        pricing: "window",
+        principal: (1n * ERG).toString(),
+        repayment: (10n * ERG).toString(),
+        timing: { mode: "window", minDuration: 1000, maxDuration: 12_000 },
+        curve: { capBps: 2000, points: [] },
+        collateral: { nanoErg: (25n * ERG).toString() },
+        rule: { kind: "oracle", ratioBps: 15_000 }
+      },
+      BigInt(HEIGHT)
+    );
+    const peakOffer = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (20n * ERG).toString(),
+        minYieldBps: 1200,
+        floorBps: 12_000,
+        minBlocks: 1000,
+        maxBlocks: 12_000,
+        erg: { batcherFeeNanoErg: (10_000_000n).toString() }, // 0.01 ERG fee -> interior concave peak
+        curve: [
+          { blocks: 1000, bps: 1200 },
+          { blocks: 12_000, bps: 1900 }
+        ]
+      },
+      BigInt(HEIGHT)
+    );
+    const chosenPeak = windowMaturity(
+      offerStateOf(peakOffer),
+      peakOrder,
+      fakeOracle,
+      BigInt(HEIGHT)
+    );
+    assert.ok(
+      chosenPeak !== null &&
+        chosenPeak > BigInt(HEIGHT + 1003) &&
+        chosenPeak < BigInt(HEIGHT + 12_000),
+      `R-4: windowMaturity must find strictly interior ERG peak, got ${String(chosenPeak)}`
+    );
+
+    // I-10: ERG batcherFee >= capital - MIN_BOX rejected by buildDraftOffer
+    let threwFeeCap = false;
+    try {
+      buildDraftOffer(
+        {
+          market: "ERG",
+          capital: (5_000_000n).toString(),
+          minYieldBps: 500,
+          floorBps: 15_000,
+          erg: { batcherFeeNanoErg: (4_500_000n).toString() }
+        },
+        BigInt(HEIGHT)
+      );
+    } catch {
+      threwFeeCap = true;
+    }
+    assert.ok(threwFeeCap, "I-10: ERG offer batcherFee >= capital - MIN_BOX must be rejected");
+
+    // I-7: partial share-ask matching in ZcMatcher when offer capital < full ask and >= minFill
+    const shareVaultRec = readZcBox(shareVaultBox) as ZcShareVault;
+    const shareAskOrder = makeChainBox({
+      id: hexId(0xf1),
+      ergoTree: getZcScript("SaleOrder", "ERG").ergoTreeHex,
+      value: 3_000_000n,
+      assets: [{ tokenId: shareTokenId, amount: 100_000_000n }],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(HASH_A),
+        encodeLongs([2n * ERG, 100_000_000n, 10_000_000n, BigInt(HEIGHT + 5000)])
+      ])
+    });
+    const partOffer = buildDraftOffer(
+      {
+        market: "ERG",
+        capital: (1n * ERG).toString(), // can only afford ~49% of the 2 ERG full share ask!
+        minYieldBps: 100,
+        floorBps: 12_000,
+        shareBounds: { floorBps: 8_000, maxExpiry: 5_000 }
+      },
+      BigInt(HEIGHT)
+    );
+    const partBookEntries = new Map<string, ZcEntry>();
+    const liveRec = readZcBox(liveBondBox)!;
+    partBookEntries.set(liveBondBox.boxId, { record: liveRec, height: HEIGHT - 10 });
+    partBookEntries.set(shareVaultBox.boxId, { record: shareVaultRec, height: HEIGHT - 5 });
+    partBookEntries.set(shareAskOrder.boxId, { record: readZcBox(shareAskOrder)!, height: HEIGHT });
+    const partBook = buildMarketBook({
+      height: HEIGHT,
+      blockId: hexId(0xaa),
+      revision: 1,
+      cut: false,
+      entries: partBookEntries,
+      confirmedOracle: fakeOracle
+    });
+    const partMatcher = new ZcMatcher(partBook, (tok) => {
+      if (tok === bondUnitId) {
+        return {
+          token: tok,
+          kind: "Order",
+          market: "ERG",
+          txId: hexId(0x61),
+          height: HEIGHT - 10,
+          held: null,
+          terms: []
+        };
+      }
+      if (tok === shareTokenId) {
+        return {
+          token: tok,
+          kind: "DutchAuctionMint",
+          market: "ERG",
+          txId: hexId(0x65),
+          height: HEIGHT - 5,
+          held: { tokenId: bondUnitId, amount: 1n },
+          terms: [100_000_000n, 5_000_000n, 5_000_000n, 20_000n, 9_000n, 720n, 2160n, LONG_MAX]
+        };
+      }
+      return null;
+    });
+    const askSrc = partMatcher.askSource(openOf(readZcBox(shareAskOrder) as ZcAsk, false));
+    assert.ok(askSrc.ok, `Expected valid share askSource, got: ${!askSrc.ok ? askSrc.error : ""}`);
+    if (askSrc.ok) {
+      const partMatch = partMatcher.evaluate(offerStateOf(partOffer), askSrc.value);
+      assert.ok(partMatch.ok, `I-7: expected partial share match, got: ${!partMatch.ok ? partMatch.error : ""}`);
+      if (partMatch.ok) {
+        assert.ok(
+          partMatch.value.units >= 10_000_000n && partMatch.value.units < 100_000_000n,
+          `I-7: expected partial units in [10M, 100M), got ${partMatch.value.units}`
+        );
+      }
+    }
+
+    // I-10 buyLot !holdsCurrency pre-check
+    const badSigUsdLot = makeChainBox({
+      id: hexId(0xf5),
+      ergoTree: getZcScript("LotAuction", "SigUSD").ergoTreeHex,
+      value: 3_000_000n,
+      assets: [{ tokenId: ZC_SIGUSD_TOKEN_ID, amount: 100n }],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(HASH_A),
+        encodeLongs([1000n, 500n, BigInt(HEIGHT), BigInt(HEIGHT + 720), BigInt(HEIGHT + 2160), 2_000_000n])
+      ])
+    });
+    h.registerRecord(badSigUsdLot, makeDisclosureTx(hexId(0xee), TREE_A));
+    const qBadLot = await quoteZcAction({ type: "buyLot", boxId: badSigUsdLot.boxId }, h.deps);
+    assert.ok(
+      qBadLot.refusals.some((r) => r.includes("holds SigUSD")),
+      `I-10: expected buyLot holdsCurrency refusal, got: ${qBadLot.refusals.join("; ")}`
+    );
+
+    // FS-1 & I-10 warnings on createAsk & SigUSD createLot
+    const qSigLot = await quoteZcAction(
+      {
+        type: "createLot",
+        body: {
+          market: "SigUSD",
+          items: [{ tokenId: NFT_ID, amount: "1" }],
+          opening: "500",
+          floor: "200",
+          start: HEIGHT,
+          end: HEIGHT + 720,
+          expiry: HEIGHT + 2160,
+          refundFeeNanoErg: "2000000"
+        }
+      },
+      h.deps
+    );
+    assert.ok(
+      qSigLot.warnings.some((w) => w.includes("entire box ERG")),
+      `I-10: expected SigUSD lot ERG warning, got: ${qSigLot.warnings.join("; ")}`
+    );
+
+    // FS-7: buildUnwrapSpend sums actual vault + holder receipt token counts instead of hardcoding 3n
+    const customReceipt = hexId(0xf9);
+    const customWrapVaultBox = makeChainBox({
+      id: hexId(0xf8),
+      ergoTree: getZcScript("WrapVault", null).ergoTreeHex,
+      value: 31_000_000n,
+      assets: [
+        { tokenId: customReceipt, amount: 2n },
+        { tokenId: NFT_ID, amount: 1n }
+      ]
+    });
+    const customHolderBox = makeChainBox({
+      id: hexId(0xf7),
+      ergoTree: TREE_A,
+      value: MIN_BOX,
+      assets: [{ tokenId: customReceipt, amount: 2n }]
+    });
+    const customVaultRec = readZcBox(customWrapVaultBox) as ZcWrapVault;
+    const unwrapSpend = buildUnwrapSpend({
+      vault: customVaultRec,
+      vaultBox: customWrapVaultBox,
+      toTree: TREE_A,
+      holderBox: customHolderBox
+    });
+    assert.deepEqual(
+      unwrapSpend.burn,
+      [{ tokenId: customReceipt, amount: 4n }],
+      "FS-7: buildUnwrapSpend must burn actual vaultLocked + holderCount (4n)"
     );
   });
 

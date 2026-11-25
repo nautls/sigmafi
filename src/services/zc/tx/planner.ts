@@ -16,10 +16,14 @@
  */
 import { hex } from "@fleet-sdk/crypto";
 import {
+  boxCandidateSize,
   ChainAsset,
   ChainBox,
   LONG_MAX,
+  MAX_BOX_SIZE,
+  MAX_COLLATERAL_TOKENS,
   MIN_BOX,
+  minBoxValue,
   readZcBox,
   ZcAsk,
   ZcBond,
@@ -38,7 +42,8 @@ import {
   classifyErgoTree,
   getZcExpressionBytes,
   marketByTokenId,
-  marketTokenId
+  marketTokenId,
+  ZC_SIGUSD_TOKEN_ID
 } from "../contracts";
 import {
   buildDraftAsk,
@@ -89,12 +94,14 @@ import {
   lotPrice,
   lotValid,
   minFillBps,
+  offerContinuationRegisters,
   orderMaturity,
   orderRefusal,
   orderWindow,
   prospectBondTerms,
   repayableFromCollateral,
   resolvePrincipal,
+  ruleCoverOfBond,
   saleGuardRefusal,
   vaultCurrency,
   ZcBondTerms
@@ -587,6 +594,55 @@ function requireCreatorAuth(
   };
 }
 
+const CAPABILITY_NFT_PATTERN = /\b(ld-nft|lithosdex|provision)\b/i;
+
+/**
+ * SF-1: Refuses raw LithosDex provision / capability NFTs unless explicitly overridden.
+ * Proven ZCS-Wrap receipts (`WrapMint` origin) are always allowed.
+ */
+async function guardRawCapabilityTokens(
+  tokens: readonly ChainAsset[],
+  ctx: ZcTxReadContext,
+  deps: ZcTxDeps,
+  height: number,
+  allowRaw: boolean,
+  actionLabel: string
+): Promise<void> {
+  if (allowRaw) return;
+  const candidates = tokens
+    .filter((t) => t.amount === 1n && t.tokenId.toLowerCase() !== ZC_SIGUSD_TOKEN_ID)
+    .map((t) => t.tokenId.toLowerCase());
+  if (candidates.length === 0) return;
+
+  if (typeof ctx.resolver.resolveTokens === "function") {
+    try {
+      await ctx.resolver.resolveTokens(candidates, height);
+    } catch {
+      // Offline / mock resolver fallback — continue with already-cached metadata and deps hook
+    }
+  }
+
+  for (const id of candidates) {
+    if (ctx.resolver.knownOrigin(id)?.kind === "WrapMint") continue;
+    if (deps.isCapabilityToken?.(id)) {
+      throw new ZcTxRefusalError(
+        `Token ${id.slice(0, 10)}… is a raw LithosDex provision / capability NFT. Wrap it into a ZCS-Wrap custody receipt before using it in ${actionLabel}.`,
+        ["wrap"]
+      );
+    }
+    const meta = typeof ctx.resolver.knownToken === "function" ? ctx.resolver.knownToken(id) : null;
+    if (meta) {
+      const hay = `${meta.name ?? ""} ${meta.description ?? ""}`;
+      if (CAPABILITY_NFT_PATTERN.test(hay)) {
+        throw new ZcTxRefusalError(
+          `Token ${meta.name || `${id.slice(0, 10)}…`} looks like a raw LithosDex provision / capability NFT. Wrap it into a ZCS-Wrap custody receipt before using it in ${actionLabel}.`,
+          ["wrap"]
+        );
+      }
+    }
+  }
+}
+
 // ─── Core planner engine (quote + build share exact validation logic) ────────
 
 interface PlanOutcome {
@@ -663,6 +719,7 @@ async function planAction(
     readonly warnings?: readonly string[];
     readonly extraFees?: readonly ZcTxFeeItem[];
     readonly assetId?: string | null;
+    readonly namedTreeHex?: string | null;
   }): PlanOutcome => {
     const quote = computeSpendQuote({
       action: params.actionName,
@@ -689,7 +746,8 @@ async function planAction(
           height,
           quote,
           assetId: params.assetId ?? null,
-          limits
+          limits,
+          namedTreeHex: params.namedTreeHex ?? null
         })
     };
   };
@@ -698,6 +756,19 @@ async function planAction(
     // ─── 1. createOrder ─────────────────────────────────────────────────────
     case "createOrder": {
       const draft = buildDraftOrder(action.body, h);
+      if (draft.box.assets.length > MAX_COLLATERAL_TOKENS) {
+        throw new ZcTxRefusalError(
+          `A borrow order accepts at most ${MAX_COLLATERAL_TOKENS} distinct collateral tokens so liquidated share vaults stay under the ${MAX_BOX_SIZE}-byte consensus limit.`
+        );
+      }
+      await guardRawCapabilityTokens(
+        draft.box.assets,
+        ctx,
+        deps,
+        height,
+        action.body.allowRawProvision === true,
+        "borrow collateral"
+      );
       const ref = orderRefusal(draft, h);
       if (ref && !ref.includes("expired")) {
         throw new ZcTxRefusalError(ref);
@@ -723,6 +794,18 @@ async function planAction(
       }
 
       const box = buildOrderOutput(draft, ownHash, height);
+      const orderSize = boxCandidateSize(box);
+      if (orderSize > MAX_BOX_SIZE) {
+        throw new ZcTxRefusalError(
+          `Order box would be ${orderSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce collateral tokens or curve points.`
+        );
+      }
+      const minOrderErg = minBoxValue(box);
+      if (box.value < minOrderErg) {
+        throw new ZcTxRefusalError(
+          `Order box ERG (${box.value.toString()} nanoERG) is below the ${minOrderErg.toString()} nanoERG consensus minimum for its ${orderSize}-byte size.`
+        );
+      }
       const warnings: string[] = [];
       if (guardRatio !== null && coverNow !== null && !atLeast(coverNow, guardRatio)) {
         warnings.push(
@@ -786,9 +869,43 @@ async function planAction(
     case "createOffer": {
       const draft = buildDraftOffer(action.body, h);
       const box = buildOfferOutput(draft, ownHash);
+      // FS-4: project post-first-fill continuation where R6 grows by +32 B (policyHash || predecessorId).
+      const projectedCont = {
+        ergoTree: box.ergoTree,
+        value: box.value,
+        creationHeight: height,
+        assets: box.assets,
+        additionalRegisters: {
+          ...box.additionalRegisters,
+          R6: offerContinuationRegisters(draft).R6
+        }
+      };
+      const projectedSize = boxCandidateSize(projectedCont);
+      if (projectedSize > MAX_BOX_SIZE) {
+        throw new ZcTxRefusalError(
+          `This lend offer's post-first-fill continuation box would be ${projectedSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce curve points or delivery metadata size.`
+        );
+      }
+      const minOfferErg = minBoxValue(projectedCont);
+      if (box.value < minOfferErg) {
+        throw new ZcTxRefusalError(
+          `Offer box ERG (${box.value.toString()} nanoERG) is below the ${minOfferErg.toString()} nanoERG consensus minimum for its ${projectedSize}-byte continuation box.`
+        );
+      }
+
       const warnings: string[] = [];
       if (batcherFee(draft) < MIN_BATCHING_FEE) {
         warnings.push("The batcher fee is under 0.002 ERG: no batcher will fill this offer.");
+      }
+      if (!isTokenOffer(draft) && batcherFee(draft) * 5n >= draft.capital) {
+        warnings.push(
+          "The batcher fee is at least 20% of the offer's ERG capital (and is paid to anyone refunding an expired offer)."
+        );
+      }
+      if (draft.terms[10] > 0n && draft.terms[9] === 0n) {
+        warnings.push(
+          "shareBounds.floorBps is 0: this offer accepts shares whose liquidation auction opens at 0% (which never auction on default)."
+        );
       }
       if (isTokenOffer(draft) && minFillBps(draft) > 100n) {
         warnings.push("The minimum fill percentage refuses small new loans.");
@@ -828,11 +945,26 @@ async function planAction(
       }
 
       const box = buildAskOutput(draft, ownHash);
+      const askWarnings: string[] = [
+        `The ask box's ${(Number(box.value) / 1e9).toFixed(3)} ERG deposit acts as a closing/expiry fee and is not returned separately on a full fill.`
+      ];
+      if (box.value - MIN_BOX > 20_000_000n) {
+        askWarnings.push(
+          "High ask closing/expiry fee (> 0.02 ERG): this ERG is spent when the ask is fully filled or refunded after expiry."
+        );
+      }
+      if (!draft.priced && draft.market === "ERG" && draft.terms[0] <= box.value) {
+        askWarnings.push(
+          "Fixed ERG ask price is at or below the ask box's own ERG closing deposit."
+        );
+      }
+
       return finishPost({
         actionName: "createAsk",
         market: draft.market,
         role: "ask",
         box,
+        warnings: askWarnings,
         terms: {
           contract: draft.script.kind,
           tokenId: draft.token.tokenId,
@@ -852,12 +984,39 @@ async function planAction(
       if (mToken && lot.items.some((t) => t.tokenId === mToken)) {
         throw new ZcTxRefusalError(`A lot paid in ${lot.market} cannot hold ${lot.market} itself.`);
       }
+      await guardRawCapabilityTokens(
+        lot.items,
+        ctx,
+        deps,
+        height,
+        action.body.allowRawProvision === true,
+        "a lot auction"
+      );
       const box = buildLotOutput(lot.market, lot.items, lot.erg, lot.terms, ownHash);
+      const lotSize = boxCandidateSize(box);
+      if (lotSize > MAX_BOX_SIZE) {
+        throw new ZcTxRefusalError(
+          `Lot box would be ${lotSize} bytes (max ${MAX_BOX_SIZE} bytes). Reduce the number of tokens in the lot.`
+        );
+      }
+      const minLotErg = minBoxValue(box);
+      if (box.value < minLotErg) {
+        throw new ZcTxRefusalError(
+          `Lot box ERG (${box.value.toString()} nanoERG) is below the ${minLotErg.toString()} nanoERG consensus minimum for its ${lotSize}-byte size.`
+        );
+      }
+      const lotWarnings: string[] = [];
+      if (mToken !== null && lot.terms[5] > 0n) {
+        lotWarnings.push(
+          `On a ${lot.market} lot auction, the entire box ERG (including the ${(Number(lot.terms[5]) / 1e9).toFixed(3)} ERG refund fee) transfers to the buyer on purchase.`
+        );
+      }
       return finishPost({
         actionName: "createLot",
         market: lot.market,
         role: "lot",
         box,
+        warnings: lotWarnings,
         terms: {
           contract: "LotAuction",
           market: lot.market,
@@ -887,6 +1046,15 @@ async function planAction(
       const market = origin.market;
       const req = buildDraftShareRequest(action.body);
       const live = ctx.book.bonds.get(asset)?.record ?? null;
+      const settled = ctx.book.settlements.get(asset)?.record ?? null;
+      if (req.auction !== null) {
+        const colCount = live ? live.collateral.length : settled ? settled.proceeds.length : 0;
+        if (colCount > MAX_COLLATERAL_TOKENS) {
+          throw new ZcTxRefusalError(
+            `This bond holds ${colCount} collateral tokens (max ${MAX_COLLATERAL_TOKENS} for selective/Dutch share vaults) so a liquidated settlement could exceed the ${MAX_BOX_SIZE}-byte box limit on pull.`
+          );
+        }
+      }
       const facts = live
         ? {
             market,
@@ -927,6 +1095,11 @@ async function planAction(
       if (req.auction === null) {
         warnings.push(
           "A plain fractional vault pays holders in kind after liquidation; lend offers do not buy plain shares."
+        );
+      }
+      if (market === "SigUSD" && req.auction !== null && req.auction.threshold === LONG_MAX) {
+        warnings.push(
+          "On a SigUSD bond, a Dutch-all vault always opens a dust auction on liquidation due to the 0.001 ERG merged box minimum, delaying partial claims until the auction ends (final claim with 100% of shares remains open; Selective vault avoids this)."
         );
       }
       if (req.terms[0] !== SHARE_COUNT) {
@@ -1089,13 +1262,13 @@ async function planAction(
         throw new ZcTxRefusalError(`Box ${id.slice(0, 10)}… is not a ZC borrow order.`);
       }
       const order: ZcOrder = decoded;
-      const ordRef = orderRefusal(order, h);
-      if (ordRef) throw new ZcTxRefusalError(ordRef);
-
       const chosen =
         action.maturity !== undefined && action.maturity !== null
           ? BigInt(action.maturity)
           : null;
+      const ordRef = orderRefusal(order, h, chosen);
+      if (ordRef) throw new ZcTxRefusalError(ordRef);
+
       const reserve = action.reserveNanoErg ?? DEFAULT_RESERVE;
       if (reserve < DEFAULT_RESERVE) {
         throw new ZcTxRefusalError(
@@ -1216,6 +1389,17 @@ async function planAction(
 
       const claim = claimRes.ok ? claimRes.value : null;
       const liveBond = claim ? ctx.book.bonds.get(claim.asset)?.record ?? null : null;
+      if (
+        claim &&
+        claim.whole > 1n &&
+        liveBond &&
+        ctx.book.shareVaults.get(token)?.record.dutch &&
+        liveBond.collateral.length > MAX_COLLATERAL_TOKENS
+      ) {
+        throw new ZcTxRefusalError(
+          `The underlying bond holds ${liveBond.collateral.length} collateral tokens (above the ${MAX_COLLATERAL_TOKENS}-token safe cap for Dutch share vaults), which could exceed the ${MAX_BOX_SIZE}-byte box limit on pull.`
+        );
+      }
 
       if (ask.priced && !isYieldAsk(ask)) {
         throw new ZcTxRefusalError(
@@ -1322,6 +1506,12 @@ async function planAction(
       if (h + 1n >= lot.expiry) {
         throw new ZcTxRefusalError(`This lot expired at height ${lot.expiry.toString()}.`);
       }
+      const mToken = marketTokenId(lot.market);
+      if (mToken && lot.box.assets.some((a) => a.tokenId === mToken)) {
+        throw new ZcTxRefusalError(
+          `This ${lot.market} lot box holds ${lot.market} itself, so the contract refuses purchases (only its seller can cancel it).`
+        );
+      }
 
       const price = lotPrice(lot, h);
       const sellerTree = await resolvePartyScript(lot, walletBook, ctx.resolver, height, "seller");
@@ -1355,7 +1545,8 @@ async function planAction(
           `Bond matures at height ${bond.maturity.toString()}: repayment is closed and liquidation is open.`
         );
       }
-      const most = repayableFromCollateral(bond);
+      const knownBorrowerTree = walletBook.byTreeHash.get(bond.borrowerHash)?.ergoTreeHex;
+      const most = repayableFromCollateral(bond, knownBorrowerTree);
       const kept =
         action.fromCollateral === "max"
           ? most
@@ -1534,6 +1725,23 @@ async function planAction(
       });
 
       const afterOut = spend.outputs[0];
+      if (afterOut.assets.length - 1 > MAX_COLLATERAL_TOKENS) {
+        throw new ZcTxRefusalError(
+          `Adding collateral would exceed the ${MAX_COLLATERAL_TOKENS}-token collateral limit.`
+        );
+      }
+      const afterSize = boxCandidateSize(afterOut);
+      if (afterSize > MAX_BOX_SIZE) {
+        throw new ZcTxRefusalError(
+          `Resulting bond box would be ${afterSize} bytes (max ${MAX_BOX_SIZE} bytes).`
+        );
+      }
+      const minAfterErg = minBoxValue(afterOut);
+      if (afterOut.value < minAfterErg) {
+        throw new ZcTxRefusalError(
+          `Resulting bond box value (${afterOut.value.toString()} nanoERG) is below the ${minAfterErg.toString()} nanoERG consensus minimum.`
+        );
+      }
       const coverAfter = ctx.book.oracle
         ? coverOfBond(
             {
@@ -1551,6 +1759,7 @@ async function planAction(
         spend,
         roles: ["bond"],
         validThrough: bond.maturity - 2n,
+        namedTreeHex: auth.ergoTreeHex,
         terms: {
           assetId: bond.asset,
           bondBoxId: bond.boxId,
@@ -1593,7 +1802,7 @@ async function planAction(
           );
         }
         if (!belowOwnRatio(bondTermsOf(bond), o.price)) {
-          const cov = coverOfBond(bondTermsOf(bond), o.price);
+          const cov = ruleCoverOfBond(bondTermsOf(bond), o.price);
           const bps = cov ? ratioBps(cov).toString() : "0";
           throw new ZcTxRefusalError(
             `This bond is at ${bps} bps cover, not below its ${payload[0].toString()} bps liquidation ratio.`
@@ -1799,13 +2008,30 @@ async function planAction(
       if (decoded?.recordType === "shareRequest") {
         const req: ZcShareRequest = decoded;
         const [n, pullFee, mintFee] = req.terms;
+        let dutchTermsOk = true;
+        if (req.dutch !== null) {
+          if (req.terms.length < 8) {
+            dutchTermsOk = false;
+          } else {
+            const [, , , openingBps, floorBpsVal, length, expiry, threshold] = req.terms;
+            dutchTermsOk =
+              floorBpsVal >= 0n &&
+              floorBpsVal <= openingBps &&
+              openingBps <= 1_000_000n &&
+              length >= 1n &&
+              length <= 1_000_000n &&
+              expiry >= length &&
+              expiry <= 1_000_000n &&
+              threshold >= 0n;
+          }
+        }
         if (
           n < 1n ||
           n > 1_000_000_000n ||
           pullFee < MIN_BATCHING_FEE ||
           mintFee < MIN_BATCHING_FEE ||
-          pullFee > reqBox.value ||
-          mintFee > reqBox.value - pullFee
+          reqBox.value < 2n * MIN_BOX + pullFee + mintFee ||
+          !dutchTermsOk
         ) {
           throw new ZcTxRefusalError(
             "This share mint request's terms are outside contract bounds, so only its owner can cancel it."
@@ -2072,10 +2298,13 @@ async function planAction(
         throw new ZcTxConflictError("Wrap vault box moved or was spent.");
       }
       const vault: ZcWrapVault = decoded;
+      const holderBox =
+        walletUtxos.find((u) => u.assets.some((a) => a.tokenId === receipt)) ?? null;
       const spend = buildUnwrapSpend({
         vault,
         vaultBox,
-        toTree: ownTree
+        toTree: ownTree,
+        holderBox
       });
 
       return finishSpend({

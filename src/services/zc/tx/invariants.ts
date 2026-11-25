@@ -7,8 +7,15 @@
  * from the final `EIP12UnsignedTransaction` JSON object.
  */
 import { EIP12UnsignedTransaction } from "@fleet-sdk/common";
-import { ChainAsset, MIN_BOX } from "../boxes";
+import {
+  boxCandidateSize,
+  ChainAsset,
+  MAX_BOX_SIZE,
+  MIN_BOX,
+  MIN_VALUE_PER_BYTE
+} from "../boxes";
 import { marketTokenId, MINER_FEE_ERGO_TREE } from "../contracts";
+import { bigMax } from "../pricing";
 import { WalletAddressBook } from "./funding";
 import { ZcTxConflictError, ZcTxInvariantError, ZcTxLimits } from "./types";
 import { ZcMarket } from "@/types/zc";
@@ -131,16 +138,23 @@ export function assertTxInvariants(exp: TxInvariantExpectation): void {
   for (let i = 0; i < outputs.length; i++) {
     const out = outputs[i];
     const val = BigInt(out.value);
-    if (val < MIN_BOX) {
-      throw new ZcTxInvariantError(
-        `Output #${i} value ${val.toString()} is below protocol minimum box value (${MIN_BOX.toString()}).`
-      );
-    }
     if (!Number.isInteger(out.creationHeight) || out.creationHeight <= 0) {
       throw new ZcTxInvariantError(`Output #${i} has invalid creationHeight: ${out.creationHeight}`);
     }
     if (!out.ergoTree || out.ergoTree.length % 2 !== 0 || !/^[0-9a-f]+$/i.test(out.ergoTree)) {
       throw new ZcTxInvariantError(`Output #${i} has malformed ErgoTree hex.`);
+    }
+    const size = boxCandidateSize(out, i);
+    if (size > MAX_BOX_SIZE) {
+      throw new ZcTxInvariantError(
+        `Output #${i} serialized size ${size} bytes exceeds Ergo consensus limit (${MAX_BOX_SIZE} bytes).`
+      );
+    }
+    const requiredMin = bigMax(MIN_BOX, BigInt(size) * MIN_VALUE_PER_BYTE);
+    if (val < requiredMin) {
+      throw new ZcTxInvariantError(
+        `Output #${i} value ${val.toString()} is below required minimum box value (${requiredMin.toString()} for ${size} bytes).`
+      );
     }
     totalOutputErg += val;
 
