@@ -296,10 +296,12 @@ function siblingRestBase(gqlEndpoint: string): string | null {
 export class ZcGraphqlClient implements ZcChainClient {
   private endpoint: string;
   private compactSchema: boolean;
+  private readonly expectedNetwork: string | null;
 
-  constructor(endpoint = DEFAULT_MAINNET_GRAPHQL_URL) {
+  constructor(endpoint = DEFAULT_MAINNET_GRAPHQL_URL, expectedNetwork?: string | null) {
     this.endpoint = endpoint;
     this.compactSchema = endpoint.includes("ergoscan");
+    this.expectedNetwork = expectedNetwork ? expectedNetwork.trim().toLowerCase() : null;
   }
 
   getEndpoint(): string {
@@ -391,10 +393,24 @@ export class ZcGraphqlClient implements ZcChainClient {
       oracleBoxes: RawBox[];
     }>(STATE_AND_ORACLE_QUERY, { oracleTrees: [ZC_ORACLE_V2_ERGO_TREE] }, signal);
 
+    const rawReported = data.state.network ? String(data.state.network).trim().toLowerCase() : "";
+    const inferredFromUrl = /testnet|tn-/i.test(this.endpoint) ? "testnet" : "";
+    const reportedNetwork = rawReported || inferredFromUrl;
+    if (
+      this.expectedNetwork &&
+      reportedNetwork &&
+      reportedNetwork !== this.expectedNetwork
+    ) {
+      throw new ZcApiError(
+        `GraphQL endpoint network mismatch: expected ${this.expectedNetwork}, got ${reportedNetwork} (${this.endpoint}).`,
+        400
+      );
+    }
+
     const state: ChainState = {
       height: Number(data.state.height),
       blockId: String(data.state.blockId).toLowerCase(),
-      network: String(data.state.network || "mainnet").toLowerCase()
+      network: reportedNetwork || this.expectedNetwork || "mainnet"
     };
 
     const nftBoxes = (data.oracleBoxes ?? []).map(mapBox).filter(holdsOracleNft);

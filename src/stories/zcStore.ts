@@ -283,10 +283,17 @@ export const useZcStore = defineStore("zc", () => {
       }
       const tokenMap: Record<string, ZcTokenMeta> = {};
       if (tokenIds.size > 0) {
-        try {
-          Object.assign(tokenMap, await zcApi.lookupAssets(Array.from(tokenIds).slice(0, 50)));
-        } catch {
-          // fail-soft
+        const allIds = Array.from(tokenIds);
+        const CHUNK_SIZE = 50;
+        const chunks: string[][] = [];
+        for (let i = 0; i < allIds.length; i += CHUNK_SIZE) {
+          chunks.push(allIds.slice(i, i + CHUNK_SIZE));
+        }
+        const results = await Promise.allSettled(chunks.map((c) => zcApi.lookupAssets(c)));
+        for (const r of results) {
+          if (r.status === "fulfilled" && r.value) {
+            Object.assign(tokenMap, r.value);
+          }
         }
       }
       for (const asset of wallet.balance) {
@@ -310,12 +317,18 @@ export const useZcStore = defineStore("zc", () => {
       const enrichedTokens: ZcWalletToken[] = adapted.walletTokens.map((t) => {
         const rate = chain.priceRates[t.id]?.fiat;
         const meta = chain.tokensMetadata[t.id] || VERIFIED_MAP.get(t.id);
-        const decimals = t.kind === "receipt" ? 0 : meta?.decimals ?? t.decimals;
+        const resolvedDec =
+          t.kind === "receipt" || t.kind === "provision"
+            ? 0
+            : meta?.decimals ?? (t.decimalsUnknown ? null : t.decimals);
+        const decimalsUnknown = resolvedDec === null;
+        const decimals = resolvedDec ?? 0;
         const amount =
           t.kind === "receipt" ? t.amount : fromRaw(t.rawAmount, decimals) ?? t.amount;
         return {
           ...t,
           decimals,
+          decimalsUnknown,
           amount,
           ticker: t.ticker.endsWith("…") && meta?.name ? meta.name : t.ticker,
           name: t.name || meta?.name || null,

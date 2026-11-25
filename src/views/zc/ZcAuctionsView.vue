@@ -41,8 +41,8 @@ const SORT_OPTIONS: readonly ZcSelectOption[] = [
   { value: "price", label: "Lowest price" }
 ];
 
-const height = computed(() => (zc.height > 100_000 ? zc.height : 1_650_000));
-const oraclePrice = computed(() => (zc.oracle.price > 0.05 ? zc.oracle.price : 1.42));
+const height = computed(() => (zc.height > 0 ? zc.height : zc.demoMode ? 1_650_000 : 0));
+const oraclePrice = computed(() => (zc.oracle.price > 0 ? zc.oracle.price : zc.demoMode ? 1.42 : 0));
 const unit = computed(() => zc.durationUnit);
 
 function onCardPointerMove(e: MouseEvent) {
@@ -62,8 +62,10 @@ function estimateItemsUsd(items: ZcAuctionLotSummary["items"], extraErg = 0): nu
   for (const it of items) {
     const id = it.id.toLowerCase();
     if (id === "erg") {
-      sum += it.amount * oraclePrice.value;
-      knownAny = true;
+      if (oraclePrice.value > 0) {
+        sum += it.amount * oraclePrice.value;
+        knownAny = true;
+      }
     } else if (id === SIGUSD_TOKEN_ID) {
       sum += it.amount;
       knownAny = true;
@@ -80,7 +82,8 @@ function estimateItemsUsd(items: ZcAuctionLotSummary["items"], extraErg = 0): nu
 
 function lotPriceNow(l: ZcAuctionLotSummary): number | null {
   if (l.phase === "expired") return null;
-  return l.priceNow ?? lotPriceAt(l, height.value);
+  if (l.priceNow != null) return l.priceNow;
+  return height.value > 0 ? lotPriceAt(l, height.value) : null;
 }
 
 function lotDiscountPct(l: ZcAuctionLotSummary): number | null {
@@ -111,18 +114,27 @@ function lotPhaseMeta(l: ZcAuctionLotSummary): {
   if (l.phase === "expired") return { label: "Expired", tone: "neutral" };
   if (l.phase === "before") {
     return {
-      label: `Starts in ${formatDur(Math.max(1, l.start - height.value), unit.value)}`,
+      label:
+        height.value > 0
+          ? `Starts in ${formatDur(Math.max(1, l.start - height.value), unit.value)}`
+          : "Upcoming",
       tone: "cobalt"
     };
   }
   if (l.phase === "falling") {
     return {
-      label: `Floor in ${formatDur(Math.max(1, l.end - height.value), unit.value)}`,
+      label:
+        height.value > 0
+          ? `Floor in ${formatDur(Math.max(1, l.end - height.value), unit.value)}`
+          : "Falling",
       tone: "ask"
     };
   }
   return {
-    label: `Floor · ends ${formatDur(Math.max(1, l.expiry - height.value), unit.value)}`,
+    label:
+      height.value > 0
+        ? `Floor · ends ${formatDur(Math.max(1, l.expiry - height.value), unit.value)}`
+        : "At floor",
     tone: "bid"
   };
 }

@@ -464,6 +464,7 @@ export interface ZcWalletToken {
   name: string | null;
   description?: string | null;
   decimals: number;
+  decimalsUnknown?: boolean;
   amount: number;
   rawAmount: string;
   kind: "token" | "provision" | "receipt" | "bond" | "shares";

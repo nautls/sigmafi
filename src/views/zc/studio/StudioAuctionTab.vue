@@ -54,8 +54,9 @@ const openingNum = computed(() => {
 });
 
 const floorNum = computed(() => {
+  if (!floorText.value.trim()) return 0;
   const n = Number(floorText.value);
-  return Number.isFinite(n) && n >= 0 ? Math.min(n, openingNum.value || n) : 0;
+  return Number.isFinite(n) && n > 0 ? n : 0;
 });
 
 const startHeight = computed(
@@ -117,10 +118,12 @@ const checks = computed(() => [
   },
   {
     label:
-      openingNum.value > 0 && openingNum.value >= floorNum.value
+      openingNum.value > 0 && floorNum.value > 0 && openingNum.value >= floorNum.value
         ? `Schedule ${formatMarketAmount(openingNum.value, market.value)} → ${formatMarketAmount(floorNum.value, market.value)}`
-        : "Opening must be ≥ floor",
-    ok: openingNum.value > 0 && openingNum.value >= floorNum.value
+        : floorNum.value <= 0
+          ? "Floor price must be > 0"
+          : "Opening must be ≥ floor",
+    ok: openingNum.value > 0 && floorNum.value > 0 && openingNum.value >= floorNum.value
   }
 ]);
 

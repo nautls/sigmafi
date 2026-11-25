@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import { Amount, Box, SignedTransaction } from "@fleet-sdk/common";
+import { ErgoAddress } from "@fleet-sdk/core";
 import {
   AlertTriangleIcon,
   CheckCircleIcon,
@@ -14,6 +16,7 @@ import {
 } from "@zhuowenli/vue-feather-icons";
 import { computed, onBeforeUnmount, onMounted, ref, watch } from "vue";
 import { useRouter } from "vue-router";
+import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
   buildZcAction,
   createZcTxDeps,
@@ -26,11 +29,19 @@ import {
   ZcExecutableAction,
   ZcTxAction,
   ZcTxConflictError,
+  ZcTxDeps,
   ZcTxQuote
 } from "@/services/zcTx";
-import { useWalletStore, useZcStore } from "@/stories";
+import { useChainStore, useWalletStore, useZcStore } from "@/stories";
 import { shortenString, showToast } from "@/utils";
-import { formatMarketAmount, formatNumber, SIGUSD_TOKEN_ID } from "@/utils/zcMath";
+import {
+  formatMarketAmount,
+  formatNumber,
+  fromRaw,
+  SHARES_UNITS,
+  shareTotalOf,
+  SIGUSD_TOKEN_ID
+} from "@/utils/zcMath";
 
 export interface PreviewRow {
   label: string;
@@ -66,10 +77,15 @@ const emit = defineEmits<{
 }>();
 
 const router = useRouter();
+const chain = useChainStore();
 const wallet = useWalletStore();
 const zc = useZcStore();
 
-type ExecPhase = "idle" | "quoting" | "ready" | "signing" | "submitted" | "error";
+const VERIFIED_BY_ID = new Map(
+  VERIFIED_ASSETS.map((a) => [a.tokenId.toLowerCase(), a.metadata])
+);
+
+type ExecPhase = "idle" | "quoting" | "ready" | "signing" | "submitted" | "partial" | "error";
 
 const phase = ref<ExecPhase>("idle");
 const copied = ref(false);
@@ -151,9 +167,56 @@ const quoteFlowSummary = computed(() => {
         };
       }
       const abs = amt < 0n ? -amt : amt;
+      const sign = amt > 0n ? "+" : "-";
+      const sharePos = zc.portfolio.positions.find(
+        (p) => p.kind === "shares" && (p.tokenId?.toLowerCase() === low || p.id.toLowerCase() === low)
+      );
+      const quoteTerms = quotes.find(
+        (q) =>
+          (typeof q.terms.tokenId === "string" && q.terms.tokenId.toLowerCase() === low) ||
+          (typeof q.terms.shareTokenId === "string" && q.terms.shareTokenId.toLowerCase() === low) ||
+          (typeof q.terms.assetId === "string" && q.terms.assetId.toLowerCase() === low) ||
+          (typeof q.terms.orderBoxId === "string" && q.terms.orderBoxId.toLowerCase() === low)
+      )?.terms;
+      if (sharePos || quoteTerms?.kind === "shares") {
+        const denom = sharePos ? shareTotalOf(sharePos) : SHARES_UNITS;
+        const pct = (Number(abs) / denom) * 100;
+        return {
+          tokenId: low,
+          label: `${sign}${formatNumber(pct, 2, 0)}% Shares · ${shortenString(low, 10)}`,
+          positive: amt > 0n
+        };
+      }
+      if (
+        quoteTerms?.kind === "bondUnit" ||
+        (typeof quoteTerms?.orderBoxId === "string" && quoteTerms.orderBoxId.toLowerCase() === low)
+      ) {
+        return {
+          tokenId: low,
+          label: `${sign}${abs.toString()} Bond Unit · ${shortenString(low, 10)}`,
+          positive: amt > 0n
+        };
+      }
+      const wTok = zc.portfolio.walletTokens.find((t) => t.id.toLowerCase() === low);
+      const cMeta = chain.tokensMetadata[low] || VERIFIED_BY_ID.get(low);
+      const dec =
+        wTok && !wTok.decimalsUnknown
+          ? wTok.decimals
+          : cMeta?.decimals != null
+            ? cMeta.decimals
+            : null;
+      const name = wTok?.ticker || cMeta?.name || shortenString(low, 10);
+      if (dec !== null) {
+        const scaled = fromRaw(abs.toString(), dec) ?? Number(abs);
+        return {
+          tokenId: low,
+          label: `${sign}${formatNumber(scaled, Math.min(6, dec), 0)} ${name}`,
+          positive: amt > 0n
+        };
+      }
       return {
         tokenId: low,
-        label: `${amt > 0n ? "+" : "-"}${abs.toString()} · ${shortenString(low, 10)}`,
+        label: `${sign}${abs.toString()} raw · ${name}`,
         positive: amt > 0n
       };
     });
@@ -247,6 +310,66 @@ async function toggleAuditDrawer() {
   }
 }
 
+function createSequentialBatchDeps(baseDeps: ZcTxDeps): ZcTxDeps {
+  const localSpentIds = new Set<string>();
+  const localCreatedBoxes = new Map<string, Box<Amount>>();
+  let walletTrees: Set<string> | null = null;
+
+  async function ensureWalletTrees(): Promise<Set<string>> {
+    if (walletTrees) return walletTrees;
+    const addrs = await baseDeps.wallet.getAddresses();
+    const set = new Set<string>();
+    for (const a of [addrs.changeAddress, ...addrs.usedAddresses, ...addrs.unusedAddresses]) {
+      try {
+        if (a && a.trim()) set.add(ErgoAddress.fromBase58(a.trim()).ergoTree.toLowerCase());
+      } catch {
+        // ignore invalid address string
+      }
+    }
+    walletTrees = set;
+    return set;
+  }
+
+  return {
+    ...baseDeps,
+    wallet: {
+      ...baseDeps.wallet,
+      async getUtxos(force = false) {
+        const live = await baseDeps.wallet.getUtxos(force);
+        const merged = new Map<string, Box<Amount>>();
+        for (const box of live) {
+          const id = String(box.boxId).toLowerCase();
+          if (localSpentIds.has(id)) continue;
+          merged.set(id, box);
+        }
+        for (const [id, box] of localCreatedBoxes) {
+          if (localSpentIds.has(id)) continue;
+          if (!merged.has(id)) merged.set(id, box);
+        }
+        return Array.from(merged.values());
+      },
+      async submitTx(signedTx: SignedTransaction) {
+        const txId = await baseDeps.wallet.submitTx(signedTx);
+        const trees = await ensureWalletTrees();
+        for (const inp of signedTx.inputs || []) {
+          const id = String(inp.boxId).toLowerCase();
+          localSpentIds.add(id);
+          localCreatedBoxes.delete(id);
+        }
+        for (const out of signedTx.outputs || []) {
+          if (!out.boxId || !out.ergoTree) continue;
+          const tree = String(out.ergoTree).toLowerCase();
+          if (!trees.has(tree)) continue;
+          const id = String(out.boxId).toLowerCase();
+          if (localSpentIds.has(id)) continue;
+          localCreatedBoxes.set(id, out as unknown as Box<Amount>);
+        }
+        return txId;
+      }
+    }
+  };
+}
+
 async function executeSign() {
   if (!canSign.value) return;
   const action = props.payload.txAction;
@@ -261,6 +384,7 @@ async function executeSign() {
     const deps = getDeps();
 
     if (action.type === "walletLendBatch") {
+      const batchDeps = createSequentialBatchDeps(deps);
       const steps = resolvedBatch.value;
       batchProgress.value = { current: 0, total: steps.length };
       for (let i = 0; i < steps.length; i++) {
@@ -268,7 +392,7 @@ async function executeSign() {
         const step = steps[i];
         const res = await signAndSubmitZcAction(
           step.action,
-          deps,
+          batchDeps,
           step.quote.suggestedLimits
         );
         submittedTxs.value.push({ txId: res.txId, label: step.label });
@@ -305,7 +429,20 @@ async function executeSign() {
     batchProgress.value = null;
     errorMsg.value = formatNautilusError(err);
     needsRequote.value = err instanceof ZcTxConflictError;
-    phase.value = submittedTxs.value.length > 0 ? "submitted" : "error";
+    phase.value = submittedTxs.value.length > 0 ? "partial" : "error";
+    if (submittedTxs.value.length > 0) {
+      showToast(
+        `${submittedTxs.value.length} of ${resolvedBatch.value.length} batch transactions submitted before stopping.`,
+        "alert-error"
+      );
+      emit(
+        "submitted",
+        submittedTxs.value.map((x) => x.txId)
+      );
+      if (!wallet.liveOverlayActive) {
+        void wallet.getBoxes(true);
+      }
+    }
   }
 }
 
@@ -466,18 +603,29 @@ async function copyTxId(txId: string) {
 
         <!-- Execution / Nautilus v3 Section -->
         <div class="space-y-2.5 px-5 py-3">
-          <!-- Submitted Result Banner -->
+          <!-- Submitted / Partially Submitted Result Banner -->
           <div
             v-if="submittedTxs.length > 0"
-            class="space-y-2 rounded-xl border border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)]/70 p-3.5"
+            class="space-y-2 rounded-xl border p-3.5"
+            :class="
+              phase === 'partial'
+                ? 'border-amber-500/45 bg-amber-500/10'
+                : 'border-[color:var(--sf-line-bid)] bg-[color:var(--sf-bid-soft)]/70'
+            "
           >
-            <div class="flex items-center gap-2 text-[12.5px] font-semibold text-[color:var(--sf-bid)]">
-              <check-circle-icon class="h-4 w-4 shrink-0" />
+            <div
+              class="flex items-center gap-2 text-[12.5px] font-semibold"
+              :class="phase === 'partial' ? 'text-amber-300' : 'text-[color:var(--sf-bid)]'"
+            >
+              <alert-triangle-icon v-if="phase === 'partial'" class="h-4 w-4 shrink-0" />
+              <check-circle-icon v-else class="h-4 w-4 shrink-0" />
               <span>
                 {{
-                  submittedTxs.length > 1
-                    ? `${submittedTxs.length} ErgoTree v3 transactions submitted`
-                    : "Transaction submitted to Ergo"
+                  phase === "partial"
+                    ? `Partially submitted (${submittedTxs.length} of ${resolvedBatch.length} transactions succeeded)`
+                    : submittedTxs.length > 1
+                      ? `${submittedTxs.length} ErgoTree v3 transactions submitted`
+                      : "Transaction submitted to Ergo"
                 }}
               </span>
             </div>
@@ -679,7 +827,7 @@ async function copyTxId(txId: string) {
 
             <!-- Security Audit Drawer: Inspect TX & Nautilus v3 Signers -->
             <div
-              v-if="allRefusals.length === 0 && (phase === 'ready' || phase === 'submitted' || phase === 'error')"
+              v-if="allRefusals.length === 0 && (phase === 'ready' || phase === 'submitted' || phase === 'partial' || phase === 'error')"
               class="rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-soft)]"
             >
               <button
@@ -778,7 +926,7 @@ async function copyTxId(txId: string) {
           </button>
 
           <button
-            v-if="hasExecutable && wallet.connected && !zc.demoMode && phase !== 'signing' && phase !== 'submitted'"
+            v-if="hasExecutable && wallet.connected && !zc.demoMode && phase !== 'signing' && phase !== 'submitted' && phase !== 'partial'"
             type="button"
             class="sf-btn-outline inline-flex h-8 items-center gap-1 rounded-full px-3 text-[11.5px]"
             :disabled="phase === 'quoting'"
@@ -809,7 +957,7 @@ async function copyTxId(txId: string) {
           </button>
 
           <button
-            v-else-if="hasExecutable && !zc.demoMode && phase !== 'submitted'"
+            v-else-if="hasExecutable && !zc.demoMode && phase !== 'submitted' && phase !== 'partial'"
             type="button"
             :disabled="!canSign"
             class="inline-flex h-8 items-center gap-1.5 rounded-full px-4 text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-45"

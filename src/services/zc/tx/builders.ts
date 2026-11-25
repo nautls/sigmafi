@@ -941,7 +941,7 @@ export function buildPullSpend(params: {
   readonly source: ZcSettlement;
   readonly sourceBox: ChainBox;
   readonly height: bigint;
-}): { readonly spend: ZcSpendDraft; readonly nextState: number | null } {
+}): { readonly spend: ZcSpendDraft; readonly nextState: number | null; readonly ergTopUp: bigint } {
   const { vault, vaultBox, source, sourceBox, height } = params;
   const value = vault.box.value + source.box.value - vault.pullFee;
   if (value < 0n || !isValidLong(value)) {
@@ -953,49 +953,78 @@ export function buildPullSpend(params: {
     encodeLongs([vault.shares, vault.outstanding, vault.pullFee])
   ];
 
-  let regs: string[];
-  let nextState: number | null;
-  if (!vault.dutch) {
-    nextState = source.liquidated ? 1 : 0;
-    regs = [...supply, encodeByte(nextState)];
-  } else {
+  const computeDutchState = (
+    vaultValue: bigint
+  ): { readonly nextState: number; readonly regs: string[] } => {
     const currency = vaultCurrency(vault);
     const held =
       currency === null
-        ? value
+        ? vaultValue
         : proceeds.filter((t) => t.tokenId === currency).reduce((acc, t) => acc + t.amount, 0n);
     const lotTokens = proceeds.filter((t) => t.tokenId !== currency);
-    const lotErg = currency === null ? 0n : value - MIN_BOX;
+    const lotErg = currency === null ? 0n : vaultValue - MIN_BOX;
     const hasLot = lotTokens.length > 0 || lotErg > 0n;
     const threshold = vault.auction[5];
     const short = held * 10_000n < vault.auction[0] * vault.auction[2];
     const thin =
       lotTokens.some((t) => t.amount < threshold) || (currency !== null && lotErg < threshold);
     const sells = source.liquidated && hasLot && thin;
-    nextState = !source.liquidated
+    const state = !source.liquidated
       ? 0
       : sells && short
         ? 1
         : sells && vault.auction[1] > 0n
           ? 4
           : 2;
-    const began = nextState === 1 || nextState === 4 ? height : 0n;
+    const began = state === 1 || state === 4 ? height : 0n;
     const nextAuction = [...vault.auction];
     nextAuction[6] = began;
-    regs = [
-      ...supply,
-      encodeByte(nextState),
-      encodeLongs(nextAuction),
-      encodeHexBytes(vault.currencyHex ?? "")
-    ];
+    return {
+      nextState: state,
+      regs: [
+        ...supply,
+        encodeByte(state),
+        encodeLongs(nextAuction),
+        encodeHexBytes(vault.currencyHex ?? "")
+      ]
+    };
+  };
+
+  let regs: string[];
+  let nextState: number | null;
+  if (!vault.dutch) {
+    nextState = source.liquidated ? 1 : 0;
+    regs = [...supply, encodeByte(nextState)];
+  } else {
+    const initial = computeDutchState(value);
+    nextState = initial.nextState;
+    regs = initial.regs;
   }
 
-  const nextVaultBase: TxOutputDraft = {
+  let nextVaultBase: TxOutputDraft = {
     ergoTree: vault.script.ergoTreeHex,
     value: bigMax(value, MIN_BOX),
     assets: [{ tokenId: vault.shareId, amount: vault.shares + 1n }, ...proceeds],
     additionalRegisters: registersFromList(regs)
   };
+  let minReq = minBoxValue(nextVaultBase);
+  let finalValue = bigMax(value, minReq);
+
+  // If dynamic minBoxValue raised the output ERG above `value` on a Dutch vault,
+  // re-evaluate held/lotErg/nextState against `finalValue` so state matches the final box.
+  if (vault.dutch && finalValue > value) {
+    const recomputed = computeDutchState(finalValue);
+    nextState = recomputed.nextState;
+    regs = recomputed.regs;
+    nextVaultBase = {
+      ...nextVaultBase,
+      value: finalValue,
+      additionalRegisters: registersFromList(regs)
+    };
+    minReq = minBoxValue(nextVaultBase);
+    finalValue = bigMax(value, minReq);
+  }
+
   const nextSize = boxCandidateSize(nextVaultBase);
   if (nextSize > MAX_BOX_SIZE) {
     throw new ZcTxRefusalError(
@@ -1004,11 +1033,12 @@ export function buildPullSpend(params: {
   }
   const nextVaultOut: TxOutputDraft = {
     ...nextVaultBase,
-    value: bigMax(value, minBoxValue(nextVaultBase))
+    value: finalValue
   };
 
   return {
     nextState: vault.dutch ? nextState : null,
+    ergTopUp: bigMax(0n, finalValue - value),
     spend: {
       inputs: [
         chainBoxToUnsignedInput(vaultBox, { 0: encodeInt(0) }),

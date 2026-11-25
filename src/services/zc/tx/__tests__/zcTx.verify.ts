@@ -51,7 +51,11 @@ import {
 } from "../../contracts";
 import { selectSpectrumTokenRates } from "../../../assetPricingService";
 import { SPECTRUM_ERG_TOKEN_ID } from "../../../spectrumService";
+import { coverage } from "../../../../utils/zcMath";
 import { buildDraftOffer, buildDraftOrder, simulateDraft } from "../../drafts";
+import { ZcApiError } from "../../errors";
+import { ZcExplorerClient } from "../../explorerClient";
+import { ZcGraphqlClient } from "../../graphqlClient";
 import { ZcJson } from "../../json";
 import { buildMarketBook, openOf, ZcMatcher } from "../../matcher";
 import { ZcResolver } from "../../resolver";
@@ -2264,6 +2268,210 @@ async function runAll(): Promise<void> {
       !rNonErgOnly.has(ZC_SIGUSD_TOKEN_ID),
       "Finding #6: non-ERG base pool for verified token must be rejected"
     );
+  });
+
+  // 23. Security audit regression tests (V2 Findings #7-#13)
+  await test("23. V2 Audit Fixes #7-#13 (Zero Oracle Coverage, Unproven SaleOrder Refusal, Network & Cache Integrity, Pending Unit Claim)", async () => {
+    // --- Finding #7: coverage() returns null when oraclePrice <= 0 ---
+    assert.equal(
+      coverage({ erg: 100, usd: 0, tokens: [] }, 50, "SigUSD", 0),
+      null,
+      "Finding #7: coverage must return null when oraclePrice is 0"
+    );
+    assert.equal(
+      coverage({ erg: 0, usd: 100, tokens: [] }, 50, "ERG", 0),
+      null,
+      "Finding #7: coverage must return null when oraclePrice is 0"
+    );
+
+    // --- Finding #9: buyAsk refuses arbitrary unproven non-bond token by default ---
+    const spoofToken = hexId(0xe8);
+    const spoofAskBox = makeChainBox({
+      id: hexId(0xe9),
+      txId: hexId(0xea),
+      ergoTree: getZcScript("SaleOrder", "ERG").ergoTreeHex,
+      value: 3_000_000n,
+      assets: [{ tokenId: spoofToken, amount: 1n }],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(HASH_CP),
+        encodeLongs([5n * ERG, 1n, 1n, BigInt(HEIGHT + 5000)])
+      ])
+    });
+    h.registerRecord(spoofAskBox, makeDisclosureTx(hexId(0xea), TREE_CP));
+
+    const qSpoof = await quoteZcAction({ type: "buyAsk", boxId: spoofAskBox.boxId }, h.deps);
+    assert.ok(
+      qSpoof.refusals.some((r) => r.includes("not a proven")),
+      `Finding #9: unproven SaleOrder must be refused by default, got: ${qSpoof.refusals.join("; ")}`
+    );
+    // Explicit allowUnproven opt-in still builds cleanly
+    const qSpoofOptIn = await quoteZcAction(
+      { type: "buyAsk", boxId: spoofAskBox.boxId, allowUnproven: true },
+      h.deps
+    );
+    assert.equal(qSpoofOptIn.refusals.length, 0, "Finding #9: allowUnproven opt-in should succeed");
+    assert.ok(qSpoofOptIn.warnings.length > 0);
+
+    // --- Finding #10a: ZcResolver discards tampered localStorage scripts ---
+    const memStorage = new Map<string, string>();
+    const storageLike = {
+      getItem: (k: string) => memStorage.get(k) ?? null,
+      setItem: (k: string, v: string) => {
+        memStorage.set(k, v);
+      },
+      removeItem: (k: string) => {
+        memStorage.delete(k);
+      }
+    };
+    const cacheKey = `sigmafi.zc.resolverCache.v1:mainnet:${ZC_PINNED_COMMIT}`;
+    memStorage.set(
+      cacheKey,
+      JSON.stringify({
+        v: 1,
+        commit: ZC_PINNED_COMMIT,
+        origins: [],
+        scripts: [
+          [HASH_A, TREE_A], // valid hash -> tree
+          [HASH_CP, TREE_A] // tampered! HASH_CP does not match blake2b256(TREE_A)
+        ],
+        roots: []
+      })
+    );
+    const mockClient = {
+      getEndpoint: () => "mock://net",
+      setEndpoint: () => undefined,
+      fetchStateAndOracle: async () => ({ state: { height: HEIGHT, blockId: hexId(1), network: "mainnet" }, oracle: null }),
+      fetchAllUnspentZcBoxes: async () => ({ boxes: [], cut: false }),
+      fetchBoxesByIds: async () => new Map(),
+      fetchTransactionsByIds: async () => new Map(),
+      fetchTokensByIds: async () => new Map(),
+      fetchTransactionsByAddresses: async () => []
+    } as unknown as ZcChainClient;
+    const resolverFromCache = new ZcResolver(() => mockClient, {
+      network: "mainnet",
+      storage: storageLike
+    });
+    assert.equal(
+      resolverFromCache.knownScript(HASH_A),
+      TREE_A,
+      "Finding #10: valid cached script must be preserved"
+    );
+    assert.equal(
+      resolverFromCache.knownScript(HASH_CP),
+      null,
+      "Finding #10: tampered cached script with hash mismatch must be discarded"
+    );
+
+    // --- Finding #10b: Explorer & GraphQL clients reject wrong-network endpoints ---
+    const origFetch = globalThis.fetch;
+    try {
+      globalThis.fetch = (async () =>
+        new Response(
+          JSON.stringify({
+            data: {
+              state: { height: 500_000, blockId: hexId(0x11), network: "testnet" },
+              oracleBoxes: []
+            }
+          }),
+          { status: 200, headers: { "Content-Type": "application/json" } }
+        )) as typeof fetch;
+      const gqlMain = new ZcGraphqlClient("https://custom.example/graphql", "mainnet");
+      let gqlRejected = false;
+      try {
+        await gqlMain.fetchStateAndOracle();
+      } catch (err) {
+        gqlRejected = err instanceof ZcApiError && err.message.includes("network mismatch");
+      }
+      assert.ok(gqlRejected, "Finding #10: ZcGraphqlClient must reject testnet response on mainnet");
+
+      globalThis.fetch = (async (url: string | URL | Request) => {
+        const u = String(url);
+        if (u.includes("/networkState") || u.includes("/info")) {
+          return new Response(
+            JSON.stringify({ height: 500_000, lastBlockId: hexId(0x11), network: "testnet" }),
+            { status: 200, headers: { "Content-Type": "application/json" } }
+          );
+        }
+        return new Response(JSON.stringify({ items: [], total: 0 }), {
+          status: 200,
+          headers: { "Content-Type": "application/json" }
+        });
+      }) as typeof fetch;
+      const expMain = new ZcExplorerClient("https://custom.example/api/v1", "mainnet");
+      let expRejected = false;
+      try {
+        await expMain.fetchStateAndOracle();
+      } catch (err) {
+        expRejected = err instanceof ZcApiError && err.message.includes("network mismatch");
+      }
+      assert.ok(expRejected, "Finding #10: ZcExplorerClient must reject testnet response on mainnet");
+    } finally {
+      globalThis.fetch = origFetch;
+    }
+
+    // --- Finding #13c: pending (mempool) bond unit settlement can be claimed ---
+    const pendBondAsset = hexId(0xeb);
+    const pendSettleBox = makeChainBox({
+      id: hexId(0xec),
+      ergoTree: getZcScript("BondVault", null).ergoTreeHex,
+      value: 5n * ERG,
+      assets: [{ tokenId: pendBondAsset, amount: 2n }],
+      additionalRegisters: registersFromList([
+        encodeHexBytes(pendBondAsset),
+        encodeByte(0),
+        encodeHexBytes(hexId(0xed))
+      ])
+    });
+    const pendSettleRec = readZcBox(pendSettleBox)!;
+    const pendH = createHarness();
+    pendH.boxes.set(pendSettleBox.boxId, pendSettleBox);
+    pendH.walletUtxos.push(
+      makeChainBox({
+        id: hexId(0xef),
+        ergoTree: TREE_A,
+        value: 2n * ERG,
+        assets: [{ tokenId: pendBondAsset, amount: 1n }]
+      })
+    );
+    const pendBaseDeps = pendH.deps;
+    const pendDeps: ZcTxDeps = {
+      ...pendBaseDeps,
+      async getReadContext() {
+        const baseCtx = await pendBaseDeps.getReadContext();
+        const pendBook = buildMarketBook({
+          height: HEIGHT,
+          blockId: hexId(0xaa),
+          revision: 2,
+          cut: false,
+          entries: new Map(),
+          pendingRecords: new Map([[pendSettleBox.boxId, pendSettleRec]]),
+          confirmedOracle: baseCtx.book.confirmedOracle
+        });
+        const mockResolver = Object.create(baseCtx.resolver) as ZcResolver;
+        mockResolver.knownOrigin = (tok: string) =>
+          tok.toLowerCase() === pendBondAsset
+            ? {
+                token: pendBondAsset,
+                kind: "Order",
+                market: "ERG",
+                txId: hexId(0x61),
+                height: HEIGHT - 100,
+                held: null,
+                terms: []
+              }
+            : baseCtx.resolver.knownOrigin(tok);
+        const pendMatcher = new ZcMatcher(pendBook, (t) => mockResolver.knownOrigin(t));
+        return { ...baseCtx, book: pendBook, resolver: mockResolver, matcher: pendMatcher };
+      }
+    };
+    const qPendClaim = await quoteZcAction({ type: "claim", tokenId: pendBondAsset }, pendDeps);
+    assert.equal(
+      qPendClaim.refusals.length,
+      0,
+      `Finding #13: pending bond unit settlement must be claimable, got: ${qPendClaim.refusals.join("; ")}`
+    );
+    const bPendClaim = await buildZcAction({ type: "claim", tokenId: pendBondAsset }, pendDeps);
+    assert.equal(bPendClaim.signers[0], null);
   });
 
   console.log(`\nALL ${passed} VERIFICATION SUITES PASSED.\n`);

@@ -48,9 +48,12 @@ const askShareTotal = computed(() => shareTotalOf(props.ask));
 
 function initState() {
   if (isWindow.value && props.ask.window) {
+    const { min, max } = props.ask.window;
+    const safeMin = max - min >= 2 ? min + 2 : min;
     const best = resolvedAskQuote(props.ask, props.height);
     const gridHit = candidates.value.find((d) => (props.height + d) % GRID_BLOCKS === 0);
-    windowBlocks.value = best?.d ?? gridHit ?? props.ask.window.min;
+    const picked = best?.d ?? gridHit ?? safeMin;
+    windowBlocks.value = Math.min(max, Math.max(safeMin, picked));
   }
   if (isShares.value) {
     sharesPct.value = (props.ask.units / askShareTotal.value) * 100;

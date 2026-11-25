@@ -340,8 +340,21 @@ export class ZcResolver {
         for (const pair of parsed.scripts.slice(-MAX_PERSISTED_ENTRIES)) {
           if (!Array.isArray(pair) || pair.length !== 2) continue;
           const [hash, tree] = pair;
-          if (typeof hash === "string" && typeof tree === "string" && hash && tree) {
-            this.scripts.set(hash.toLowerCase(), tree.toLowerCase());
+          if (typeof hash !== "string" || typeof tree !== "string" || !hash || !tree) continue;
+          const lowHash = hash.toLowerCase();
+          const lowTree = tree.toLowerCase();
+          if (
+            !/^[0-9a-f]{64}$/.test(lowHash) ||
+            lowTree.length % 2 !== 0 ||
+            !/^[0-9a-f]+$/.test(lowTree)
+          ) {
+            continue;
+          }
+          try {
+            if (hex.encode(blake2b256(hex.decode(lowTree))) !== lowHash) continue;
+            this.scripts.set(lowHash, lowTree);
+          } catch {
+            // discard corrupted/tampered script entry
           }
         }
       }

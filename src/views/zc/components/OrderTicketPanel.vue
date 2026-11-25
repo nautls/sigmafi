@@ -145,7 +145,8 @@ const walletMarketBalance = computed<number | null>(() => {
     const raw = wallet.balance.find((x) => x.tokenId === ERG_TOKEN_ID)?.amount || 0n;
     return Number(decimalize(raw, { decimals: ERG_DECIMALS }));
   }
-  const raw = wallet.balance.find((x) => x.tokenId === SIGUSD_TOKEN_ID)?.amount || 0n;
+  const raw =
+    wallet.balance.find((x) => x.tokenId.toLowerCase() === SIGUSD_TOKEN_ID)?.amount || 0n;
   return Number(raw) / 100;
 });
 

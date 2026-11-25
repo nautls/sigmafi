@@ -161,10 +161,15 @@ const remBlocks = computed(() =>
   position.value ? Math.max(1, position.value.bond.maturity - height.value) : DAY_BLOCKS
 );
 
+const tooCloseToMaturity = computed(
+  () => !!position.value && position.value.bond.maturity - height.value < 36
+);
+
 const expiryHeight = computed(() => {
   if (!position.value) return height.value + 7 * DAY_BLOCKS;
+  const maxAllowed = position.value.bond.maturity - 6;
   const raw = height.value + Math.max(60, Math.round((expiryDays.value || 7) * DAY_BLOCKS));
-  return Math.max(height.value + 30, Math.min(raw, position.value.bond.maturity - 6));
+  return Math.min(maxAllowed, Math.max(height.value + 30, raw));
 });
 
 const bidLine = computed(() => posSnap.value.curves?.bidLine || []);
@@ -326,7 +331,7 @@ let simTimer: number | null = null;
 let simAc: AbortController | null = null;
 
 function buildDraft() {
-  if (!position.value) return null;
+  if (!position.value || tooCloseToMaturity.value) return null;
   return buildAskBody({
     tokenId: position.value.tokenId || position.value.id,
     market: posMarket.value,
@@ -904,10 +909,10 @@ function openPreview() {
         <button
           type="button"
           class="sf-btn-cobalt flex h-10 w-full items-center justify-center gap-2 rounded-xl text-[13.5px] disabled:cursor-not-allowed disabled:opacity-45"
-          :disabled="!salePriceNow"
+          :disabled="!salePriceNow || tooCloseToMaturity"
           @click="openPreview"
         >
-          <span>List for Sale</span>
+          <span>{{ tooCloseToMaturity ? "Too close to maturity" : "List for Sale" }}</span>
           <arrow-right-icon class="h-4 w-4" />
         </button>
       </div>

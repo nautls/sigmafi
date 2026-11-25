@@ -1299,10 +1299,12 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
       const known = VERIFIED_META_BY_ID.get(id);
       const isReceipt = t.kind === "wrapReceipt" || meta?.kind === "wrapReceipt";
       const isProvision = !isReceipt && t.kind === "provision";
-      const decimals =
+      const resolvedDecimals =
         isReceipt || isProvision
           ? 0
-          : meta?.decimals ?? known?.decimals ?? (id === LIT_TOKEN_ID ? 9 : 0);
+          : meta?.decimals ?? known?.decimals ?? (id === LIT_TOKEN_ID ? 9 : null);
+      const decimalsUnknown = resolvedDecimals === null;
+      const decimals = resolvedDecimals ?? 0;
       walletTokens.push({
         id,
         ticker:
@@ -1319,6 +1321,7 @@ export function adaptPortfolio(raw: any, tokenMap: Record<string, ZcTokenMeta> =
         name: meta?.name || known?.name || (id === LIT_TOKEN_ID ? "Lithos" : null),
         description: meta?.description ?? null,
         decimals,
+        decimalsUnknown,
         amount: isReceipt || isProvision ? Number(t.amount || 1) : fromRaw(t.amount, decimals) ?? 0,
         rawAmount: String(t.amount ?? "0"),
         kind: isReceipt ? "receipt" : isProvision ? "provision" : "token",

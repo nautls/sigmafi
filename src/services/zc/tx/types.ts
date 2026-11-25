@@ -127,6 +127,7 @@ export type ZcTxAction =
       readonly boxId: string;
       readonly units?: bigint | null;
       readonly allowLiquidatable?: boolean;
+      readonly allowUnproven?: boolean;
     }
   | { readonly type: "buyLot"; readonly boxId: string }
   | {

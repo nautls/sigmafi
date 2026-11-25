@@ -405,6 +405,7 @@ export function coverage(
   market: ZcMarket,
   oraclePrice: number
 ): number | null {
+  if (!(oraclePrice > 0)) return null;
   const value = (collateral.erg || 0) * oraclePrice + (collateral.usd || 0);
   const debt = market === "ERG" ? repayment * oraclePrice : repayment;
   return debt > 0 ? (value / debt) * 100 : null;

@@ -247,9 +247,11 @@ async function mapPool<T, R>(
 
 export class ZcExplorerClient implements ZcChainClient {
   private endpoint: string;
+  private readonly expectedNetwork: string | null;
 
-  constructor(endpoint = DEFAULT_MAINNET_EXPLORER_URL) {
+  constructor(endpoint = DEFAULT_MAINNET_EXPLORER_URL, expectedNetwork?: string | null) {
     this.endpoint = normalizeExplorerUrl(endpoint);
+    this.expectedNetwork = expectedNetwork ? expectedNetwork.trim().toLowerCase() : null;
   }
 
   getEndpoint(): string {
@@ -318,7 +320,20 @@ export class ZcExplorerClient implements ZcChainClient {
 
     const height = Number(netRes.height ?? netRes.fullHeight ?? 0);
     const blockId = String(netRes.lastBlockId ?? netRes.blockId ?? "").toLowerCase();
-    const network = String(netRes.network || "mainnet").toLowerCase();
+    const rawReported = netRes.network ? String(netRes.network).trim().toLowerCase() : "";
+    const inferredFromUrl = /testnet|tn-/i.test(this.endpoint) ? "testnet" : "";
+    const reportedNetwork = rawReported || inferredFromUrl;
+    if (
+      this.expectedNetwork &&
+      reportedNetwork &&
+      reportedNetwork !== this.expectedNetwork
+    ) {
+      throw new ZcApiError(
+        `Explorer endpoint network mismatch: expected ${this.expectedNetwork}, got ${reportedNetwork} (${this.endpoint}).`,
+        400
+      );
+    }
+    const network = reportedNetwork || this.expectedNetwork || "mainnet";
 
     const nftBoxes = (oraclePage?.items ?? []).map(mapExplorerBox).filter(holdsOracleNft);
     const oracle = nftBoxes.length === 1 ? readZcOracle(nftBoxes[0]) : null;

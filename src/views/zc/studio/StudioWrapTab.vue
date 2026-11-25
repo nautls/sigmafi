@@ -25,7 +25,9 @@ const wallet = useWalletStore();
 
 const wrappableTokens = computed<ZcWalletToken[]>(() =>
   zc.portfolio.walletTokens.filter(
-    (t) => t.kind !== "receipt" && t.decimals === 0 && t.amount === 1
+    (t) =>
+      t.kind === "provision" ||
+      (t.kind !== "receipt" && !t.decimalsUnknown && t.decimals === 0 && t.amount === 1)
   )
 );
 

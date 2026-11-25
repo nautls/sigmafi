@@ -37,11 +37,17 @@ const market = computed<ZcMarket>(() => bond.value.market);
 
 // --- Repay state ---
 const useCollateral = ref(false);
-const ownInBond = computed(() =>
-  market.value === "ERG"
-    ? Math.max(0, (bond.value.collateral.erg || 0) - 0.001)
-    : bond.value.collateral.usd || 0
-);
+const ownInBond = computed(() => {
+  if (market.value !== "ERG") return bond.value.collateral.usd || 0;
+  const extraTokens =
+    (bond.value.collateral.tokens?.length || 0) + ((bond.value.collateral.usd || 0) > 0 ? 1 : 0);
+  // Dynamic Ergo min-box reserve (~360 nanoERG/byte; base ~100 B + ~40 B per distinct collateral token)
+  const minReturnErg =
+    extraTokens > 0
+      ? Math.max(0.001, Math.ceil(((100 + extraTokens * 40) * 360) / 1e5) / 1e4)
+      : 0.001;
+  return Math.max(0, (bond.value.collateral.erg || 0) - minReturnErg);
+});
 const usedFromBond = computed(() =>
   useCollateral.value ? Math.min(ownInBond.value, bond.value.repayment) : 0
 );

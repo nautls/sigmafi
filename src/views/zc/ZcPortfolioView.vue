@@ -122,8 +122,8 @@ const actionModal = ref<{ mode: "repay" | "addCollateral"; position: ZcPortfolio
 );
 const previewPayload = ref<ExecutionPreviewPayload | null>(null);
 
-const height = computed(() => (zc.height > 100_000 ? zc.height : 1_650_000));
-const oraclePrice = computed(() => (zc.oracle.price > 0.05 ? zc.oracle.price : 1.42));
+const height = computed(() => (zc.height > 0 ? zc.height : zc.demoMode ? 1_650_000 : 0));
+const oraclePrice = computed(() => (zc.oracle.price > 0 ? zc.oracle.price : zc.demoMode ? 1.42 : 0));
 const unit = computed(() => zc.durationUnit);
 
 const isReady = computed(() => wallet.connected || zc.demoMode);
@@ -182,7 +182,9 @@ watch(
 
 const rawWrappableNfts = computed(() =>
   zc.portfolio.walletTokens.filter(
-    (t) => t.kind === "provision" || (t.kind !== "receipt" && t.decimals === 0 && t.amount === 1)
+    (t) =>
+      t.kind === "provision" ||
+      (t.kind !== "receipt" && !t.decimalsUnknown && t.decimals === 0 && t.amount === 1)
   )
 );
 

@@ -122,7 +122,7 @@ function removeToken(id: string) {
 }
 
 function isNft(tok: ZcWalletToken) {
-  return tok.decimals === 0 && tok.amount === 1;
+  return !tok.decimalsUnknown && tok.decimals === 0 && tok.amount === 1;
 }
 </script>
 
@@ -246,8 +246,16 @@ function isNft(tok: ZcWalletToken) {
           </div>
 
           <div class="flex shrink-0 items-center gap-1.5">
-            <span class="sf-mono text-[11px] font-semibold text-[color:var(--sf-ink-2)]">
-              {{ formatNumber(tok.amount, Math.min(4, tok.decimals), 0) }}
+            <span
+              class="sf-mono text-[11px] font-semibold text-[color:var(--sf-ink-2)]"
+              :title="
+                tok.decimalsUnknown
+                  ? 'Token decimals could not be loaded — amount shown in raw base units'
+                  : undefined
+              "
+            >
+              {{ formatNumber(tok.amount, Math.min(4, tok.decimals), 0)
+              }}<span v-if="tok.decimalsUnknown" class="ml-0.5 text-[9.5px] text-[color:var(--sf-ask)]">raw</span>
             </span>
 
             <button

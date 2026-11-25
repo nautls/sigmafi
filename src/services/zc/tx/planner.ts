@@ -1433,10 +1433,17 @@ async function planAction(
       const m = matcherWithFreshOrigins(ctx);
       const claimRes = m.claimOf(token);
 
-      if (!claimRes.ok && ctx.book.shareVaults.has(token)) {
-        throw new ZcTxRefusalError(
-          `${token.slice(0, 10)}… sits in a share vault naming a bond, but no standard share mint minted it: anyone can create such a vault, so it claims nothing.`
-        );
+      if (!claimRes.ok) {
+        if (ctx.book.shareVaults.has(token)) {
+          throw new ZcTxRefusalError(
+            `${token.slice(0, 10)}… sits in a share vault naming a bond, but no standard share mint minted it: anyone can create such a vault, so it claims nothing.`
+          );
+        }
+        if (!action.allowUnproven) {
+          throw new ZcTxRefusalError(
+            `Token ${token.slice(0, 10)}… is not a proven SigmaFi bond unit or bond shares (${claimRes.error}): refusing to buy an unproven claim.`
+          );
+        }
       }
 
       const claim = claimRes.ok ? claimRes.value : null;
@@ -1919,7 +1926,6 @@ async function planAction(
         const settlements: ZcSettlement[] = ctx.book.allOpen
           .filter(
             (o) =>
-              !o.pending &&
               o.record.recordType === "settlement" &&
               o.record.asset === token
           )
@@ -1927,7 +1933,7 @@ async function planAction(
 
         if (settlements.length === 0) {
           throw new ZcTxRefusalError(
-            "No confirmed settlement vault holds this bond's reserve yet."
+            "No settlement vault holds this bond's reserve yet."
           );
         }
         if (walletHeld(walletUtxos, token) < 1n) {
@@ -2020,6 +2026,15 @@ async function planAction(
 
         const warnings: string[] = [];
         if (!finalClaim) {
+          const paidErgRaw = (vault.box.value * burned) / vault.outstanding;
+          const expectedContErg = vault.box.value - paidErgRaw;
+          const contOut = spend.outputs[1];
+          if (contOut && contOut.value > expectedContErg) {
+            const topUp = contOut.value - expectedContErg;
+            warnings.push(
+              `Your wallet contributes ${(Number(topUp) / 1e9).toFixed(4)} ERG to keep the remaining share vault above Ergo's minimum box value.`
+            );
+          }
           for (const t of vault.box.assets.slice(1)) {
             if ((t.amount * burned) / vault.outstanding === 0n) {
               const minShares = (vault.outstanding + t.amount - 1n) / t.amount;
@@ -2239,7 +2254,7 @@ async function planAction(
         throw new ZcTxConflictError("Settlement vault box moved or was spent.");
       }
 
-      const { spend, nextState } = buildPullSpend({
+      const { spend, nextState, ergTopUp } = buildPullSpend({
         vault,
         vaultBox,
         source: sourceRec,
@@ -2247,12 +2262,20 @@ async function planAction(
         height: h
       });
 
+      const warnings: string[] = [];
+      if (ergTopUp > 0n) {
+        warnings.push(
+          `Your wallet contributes ${(Number(ergTopUp) / 1e9).toFixed(4)} ERG to keep the pulled share vault above Ergo's minimum box value.`
+        );
+      }
+
       return finishSpend({
         actionName: "pull",
         market: null,
         spend,
         roles: ["vault"],
         validThrough: null,
+        warnings,
         extraFees: [feeItem("pull", vault.pullFee, "earned")],
         terms: {
           vaultBoxId: id,

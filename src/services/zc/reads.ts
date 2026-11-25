@@ -1,4 +1,5 @@
 import { Network } from "@fleet-sdk/core";
+import { getNetworkType } from "@/utils/otherUtils";
 import {
   ChainAsset,
   LONG_MAX,
@@ -330,15 +331,22 @@ export class ZcGraphqlEngine {
     this.resolver = new ZcResolver(() => this.client);
   }
 
+  private expectedNetworkName(): string {
+    return getNetworkType() === Network.Testnet ? "testnet" : "mainnet";
+  }
+
   private buildHistoricalClient(): ZcChainClient {
+    const net = this.expectedNetworkName();
     return this.historicalTransport === "graphql"
-      ? new ZcGraphqlClient(this.historicalEndpoint || DEFAULT_MAINNET_GRAPHQL_URL)
-      : new ZcExplorerClient(this.historicalEndpoint || DEFAULT_MAINNET_EXPLORER_URL);
+      ? new ZcGraphqlClient(this.historicalEndpoint || DEFAULT_MAINNET_GRAPHQL_URL, net)
+      : new ZcExplorerClient(this.historicalEndpoint || DEFAULT_MAINNET_EXPLORER_URL, net);
   }
 
   private createTransportClient(transport: ZcChainTransport, endpoint: string): ZcChainClient {
+    const net = this.expectedNetworkName();
     if (transport === "hergmes") {
       const hc = new ZcHergmesClient(endpoint || DEFAULT_MAINNET_HERGMES_URL, {
+        network: getNetworkType(),
         historicalClient: this.buildHistoricalClient()
       });
       this.hergmesClient = hc;
@@ -350,8 +358,8 @@ export class ZcGraphqlEngine {
     this.hergmesClient = null;
     this.unsubHergmesLive = null;
     return transport === "graphql"
-      ? new ZcGraphqlClient(endpoint || DEFAULT_MAINNET_GRAPHQL_URL)
-      : new ZcExplorerClient(endpoint || DEFAULT_MAINNET_EXPLORER_URL);
+      ? new ZcGraphqlClient(endpoint || DEFAULT_MAINNET_GRAPHQL_URL, net)
+      : new ZcExplorerClient(endpoint || DEFAULT_MAINNET_EXPLORER_URL, net);
   }
 
   private teardownHergmes(): void {
