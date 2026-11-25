@@ -240,12 +240,6 @@ function openKya() {
                   <span>Lend on a Curve</span>
                   <arrow-right-icon class="h-4 w-4" />
                 </router-link>
-                <router-link
-                  to="/app"
-                  class="sf-btn-outline inline-flex h-11 items-center rounded-full px-5 text-[14px]"
-                >
-                  <span>Open Yield Curve</span>
-                </router-link>
               </div>
             </div>
           </div>
@@ -308,17 +302,11 @@ function openKya() {
 
               <div class="mt-8 flex flex-wrap items-center gap-3.5">
                 <router-link
-                  to="/app?side=borrow"
+                  to="/app/auctions"
                   class="sf-btn-primary inline-flex h-11 items-center gap-2 rounded-full px-6 text-[14px]"
                 >
-                  <span>Borrow Fixed-Term</span>
-                  <arrow-right-icon class="h-4 w-4" />
-                </router-link>
-                <router-link
-                  to="/app/auctions"
-                  class="sf-btn-outline inline-flex h-11 items-center rounded-full px-5 text-[14px]"
-                >
                   <span>View Auctions</span>
+                  <arrow-right-icon class="h-4 w-4" />
                 </router-link>
               </div>
             </div>
