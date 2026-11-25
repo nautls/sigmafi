@@ -13,18 +13,21 @@ import MarketCoin from "@/components/MarketCoin.vue";
 import SigmaFiMark from "@/components/SigmaFiMark.vue";
 import ThemeToggle from "@/components/ThemeToggle.vue";
 import ZcKyaModal from "@/components/ZcKyaModal.vue";
-import { ERG_DECIMALS } from "@/constants";
+import { ERG_DECIMALS, ERG_TOKEN_ID } from "@/constants";
 import {
   DEFAULT_MAINNET_EXPLORER_URL,
   DEFAULT_MAINNET_GRAPHQL_URL,
+  DEFAULT_MAINNET_HERGMES_URL,
+  isValidHergmesUrl,
   OFFICIAL_MAINNET_EXPLORER_URL,
   SIGMASPACE_GRAPHQL_URL,
-  zcApi
+  zcApi,
+  ZcDataSource
 } from "@/services/zcApi";
 import { useUIStore, useWalletStore, useZcStore } from "@/stories";
 import { ZcMarket, ZcSearchHit } from "@/types/zc";
 import { shortenString } from "@/utils";
-import { formatApr } from "@/utils/zcMath";
+import { formatApr, formatNumber, SIGUSD_TOKEN_ID } from "@/utils/zcMath";
 
 const zc = useZcStore();
 const wallet = useWalletStore();
@@ -34,7 +37,20 @@ const router = useRouter();
 
 const kyaOpen = ref(!ui.isKYAAccepted.value);
 
-type ChainFeedMode = "explorer" | "graphql";
+type ChainFeedMode = "hergmes" | "explorer" | "graphql";
+
+const HERGMES_LOCAL_URL = "http://127.0.0.1:8080";
+
+const HERGMES_PRESETS = computed(() => {
+  const list: { label: string; url: string }[] = [];
+  const def = zc.defaultHergmesUrl;
+  if (def && isValidHergmesUrl(def) && def !== DEFAULT_MAINNET_HERGMES_URL) {
+    list.push({ label: "Default", url: def });
+  }
+  list.push({ label: "Nautilus Relay", url: DEFAULT_MAINNET_HERGMES_URL });
+  list.push({ label: "Local (127.0.0.1:8080)", url: HERGMES_LOCAL_URL });
+  return list;
+});
 
 const EXPLORER_PRESETS = [
   { label: "ErgoScan", url: DEFAULT_MAINNET_EXPLORER_URL },
@@ -46,15 +62,31 @@ const GRAPHQL_PRESETS = [
   { label: "SigmaSpace", url: SIGMASPACE_GRAPHQL_URL }
 ] as const;
 
+function feedModeOf(source: ZcDataSource): ChainFeedMode {
+  if (source === "hergmes") return "hergmes";
+  if (source === "graphql") return "graphql";
+  return "explorer";
+}
+
+function endpointForMode(mode: ChainFeedMode): string {
+  if (mode === "hergmes") return zc.hergmesUrl;
+  if (mode === "graphql") return zc.graphqlUrl;
+  return zc.explorerUrl;
+}
+
 const feedOpen = ref(false);
-const feedModeInput = ref<ChainFeedMode>(zc.dataSource === "graphql" ? "graphql" : "explorer");
-const endpointInput = ref(
-  zc.dataSource === "graphql" ? zc.graphqlUrl : zc.explorerUrl
-);
+const feedModeInput = ref<ChainFeedMode>(feedModeOf(zc.dataSource));
+const endpointInput = ref(endpointForMode(feedModeInput.value));
 const feedRef = ref<HTMLElement | null>(null);
 
-const activePresets = computed(() =>
-  feedModeInput.value === "explorer" ? EXPLORER_PRESETS : GRAPHQL_PRESETS
+const activePresets = computed(() => {
+  if (feedModeInput.value === "hergmes") return HERGMES_PRESETS.value;
+  if (feedModeInput.value === "explorer") return EXPLORER_PRESETS;
+  return GRAPHQL_PRESETS;
+});
+
+const hergmesUrlInvalid = computed(
+  () => feedModeInput.value === "hergmes" && !isValidHergmesUrl(endpointInput.value)
 );
 
 const searchInputRef = ref<HTMLInputElement | null>(null);
@@ -71,14 +103,14 @@ function syncRouteMarket() {
 }
 
 function toggleFeedPopover() {
-  feedModeInput.value = zc.dataSource === "graphql" ? "graphql" : "explorer";
-  endpointInput.value = feedModeInput.value === "graphql" ? zc.graphqlUrl : zc.explorerUrl;
+  feedModeInput.value = feedModeOf(zc.dataSource);
+  endpointInput.value = endpointForMode(feedModeInput.value);
   feedOpen.value = !feedOpen.value;
 }
 
 function switchFeedMode(mode: ChainFeedMode) {
   feedModeInput.value = mode;
-  endpointInput.value = mode === "graphql" ? zc.graphqlUrl : zc.explorerUrl;
+  endpointInput.value = endpointForMode(mode);
 }
 
 function pickPreset(url: string) {
@@ -88,6 +120,12 @@ function pickPreset(url: string) {
 
 function saveEndpoint() {
   const mode = feedModeInput.value;
+  if (mode === "hergmes") {
+    if (!isValidHergmesUrl(endpointInput.value)) return;
+    zc.applyHergmesFeed(endpointInput.value);
+    feedOpen.value = false;
+    return;
+  }
   if (zc.dataSource !== mode) {
     zc.updateDataSource(mode);
   }
@@ -100,10 +138,23 @@ function saveEndpoint() {
 }
 
 function resetEndpoint() {
+  if (isValidHergmesUrl(zc.defaultHergmesUrl)) {
+    feedModeInput.value = "hergmes";
+    endpointInput.value = zc.defaultHergmesUrl;
+    zc.applyHergmesFeed("");
+  } else {
+    feedModeInput.value = "explorer";
+    endpointInput.value = zc.defaultExplorerUrl;
+    zc.updateDataSource("explorer");
+    zc.updateExplorerUrl("");
+  }
+  feedOpen.value = false;
+}
+
+function fallbackToExplorer() {
   feedModeInput.value = "explorer";
-  endpointInput.value = zc.defaultExplorerUrl;
+  endpointInput.value = zc.explorerUrl;
   zc.updateDataSource("explorer");
-  zc.updateExplorerUrl("");
   feedOpen.value = false;
 }
 
@@ -208,9 +259,9 @@ watch(
 );
 
 onMounted(() => {
-  // Always use a direct Ergo blockchain feed (Explorer REST or GraphQL)
+  // Always use a direct Ergo blockchain feed (Hergmes WS, Explorer REST, or GraphQL)
   if (zc.dataSource === "lithos") {
-    zc.updateDataSource("explorer");
+    zc.updateDataSource(isValidHergmesUrl(zc.defaultHergmesUrl) ? "hergmes" : "explorer");
   }
   zc.start();
   document.addEventListener("mousedown", onDocClick);
@@ -230,12 +281,68 @@ const ergBalance = computed(() => {
   return decimalize(raw, { decimals: ERG_DECIMALS, thousandMark: "," });
 });
 
+const walletPendingTooltip = computed(() => {
+  if (!wallet.hasPendingTx) return "Connected via Nautilus — click to disconnect";
+  const parts: string[] = [];
+  const ergDelta = wallet.pendingBalance.get(ERG_TOKEN_ID) ?? 0n;
+  if (ergDelta !== 0n) {
+    const sign = ergDelta > 0n ? "+" : "-";
+    const absErg = Number(ergDelta < 0n ? -ergDelta : ergDelta) / 1e9;
+    parts.push(`${sign}${formatNumber(absErg, 3, 0)} ERG`);
+  }
+  const usdDelta = wallet.pendingBalance.get(SIGUSD_TOKEN_ID) ?? 0n;
+  if (usdDelta !== 0n) {
+    const sign = usdDelta > 0n ? "+" : "-";
+    const absUsd = Number(usdDelta < 0n ? -usdDelta : usdDelta) / 100;
+    parts.push(`${sign}${formatNumber(absUsd, 2, 2)} SigUSD`);
+  }
+  return parts.length > 0
+    ? `Pending mempool: ${parts.join(", ")} · click to disconnect`
+    : "Pending mempool transaction · click to disconnect";
+});
+
 const oracleStale = computed(
   () => zc.connected && (zc.oracle.missing || zc.oracle.refreshPending || zc.oracle.age > 30)
 );
 
+const hergmesPhaseLabel = computed(() => {
+  switch (zc.streamPhase) {
+    case "live":
+      return "live";
+    case "connecting":
+    case "snapshot":
+    case "catching_up":
+      return "syncing";
+    case "waiting":
+    case "disconnected":
+      return "reconnecting";
+    case "rejected":
+      return "rejected";
+    default:
+      return "idle";
+  }
+});
+
+const feedDotIdle = computed(
+  () =>
+    !zc.connected ||
+    (zc.dataSource === "hergmes" &&
+      (zc.streamPhase === "disconnected" || zc.streamPhase === "rejected"))
+);
+
+const feedDotWarn = computed(
+  () =>
+    !feedDotIdle.value &&
+    (oracleStale.value || (zc.dataSource === "hergmes" && zc.streamPhase !== "live"))
+);
+
 const chainTooltip = computed(() => {
-  const via = zc.dataSource === "graphql" ? "GraphQL" : "Explorer API";
+  const via =
+    zc.dataSource === "hergmes"
+      ? `Hergmes WS (${hergmesPhaseLabel.value})`
+      : zc.dataSource === "graphql"
+        ? "GraphQL"
+        : "Explorer API";
   if (!zc.connected) return zc.loading ? `Syncing Ergo ${via}...` : zc.error || "Feed offline";
   if (zc.oracle.missing) {
     return `Block #${zc.height.toLocaleString("en-US")} (${via}) · Oracle box missing`;
@@ -245,7 +352,8 @@ const chainTooltip = computed(() => {
     : zc.oracle.age > 30
       ? `Oracle stale (${zc.oracle.age} blk)`
       : `Oracle fresh (${zc.oracle.age} blk)`;
-  return `#${zc.height.toLocaleString("en-US")} (${via}) · ERG $${zc.oracle.price.toFixed(3)} · ${status}`;
+  const mempoolTag = zc.mempoolActive ? " · Mempool active" : "";
+  return `#${zc.height.toLocaleString("en-US")} (${via}${mempoolTag}) · ERG $${zc.oracle.price.toFixed(3)} · ${status}`;
 });
 
 const isSingleScreen = computed(() => route.name === "zc-market" || route.name === "zc-studio");
@@ -491,7 +599,7 @@ const navItems = [
           </button>
           -->
 
-          <!-- Blockchain Feed Pill + Popover (Explorer REST + GraphQL) -->
+          <!-- Blockchain Feed Pill + Popover (Hergmes WS + Explorer REST + GraphQL) -->
           <div ref="feedRef" class="relative" @keydown.esc="feedOpen = false">
             <button
               type="button"
@@ -502,7 +610,7 @@ const navItems = [
             >
               <span
                 class="sf-live-dot"
-                :class="{ 'is-warn': oracleStale, 'is-idle': !zc.connected }"
+                :class="{ 'is-warn': feedDotWarn, 'is-idle': feedDotIdle }"
               />
               <span v-if="zc.connected" class="hidden xl:inline">
                 #{{ zc.height.toLocaleString("en-US") }}
@@ -518,7 +626,7 @@ const navItems = [
             <transition name="sf-pop">
               <div
                 v-if="feedOpen"
-                class="sf-popover fixed inset-x-4 top-[66px] z-50 rounded-2xl p-4 sm:absolute sm:inset-x-auto sm:right-0 sm:top-[calc(100%+10px)] sm:w-[340px]"
+                class="sf-popover fixed inset-x-4 top-[66px] z-50 rounded-2xl p-4 sm:absolute sm:inset-x-auto sm:right-0 sm:top-[calc(100%+10px)] sm:w-[360px]"
               >
                 <div class="flex items-center justify-between pb-3">
                   <span
@@ -536,12 +644,22 @@ const navItems = [
                   </button>
                 </div>
 
-                <!-- Transport Mode Switch: Explorer API vs GraphQL -->
+                <!-- Transport Mode Switch: Hergmes WS vs Explorer API vs GraphQL -->
                 <div
-                  class="sf-seg mb-3 grid w-full grid-cols-2 text-[11.5px]"
+                  class="sf-seg mb-3 grid w-full grid-cols-3 text-[11px]"
                   role="tablist"
                   aria-label="Blockchain API transport"
                 >
+                  <button
+                    type="button"
+                    role="tab"
+                    :aria-selected="feedModeInput === 'hergmes'"
+                    class="sf-seg-btn py-1.5"
+                    :class="feedModeInput === 'hergmes' ? 'is-active tone-cobalt' : ''"
+                    @click="switchFeedMode('hergmes')"
+                  >
+                    Hergmes
+                  </button>
                   <button
                     type="button"
                     role="tab"
@@ -569,19 +687,30 @@ const navItems = [
                     <input
                       v-model="endpointInput"
                       :aria-label="
-                        feedModeInput === 'explorer'
-                          ? 'Ergo Explorer API URL'
-                          : 'Ergo GraphQL endpoint URL'
+                        feedModeInput === 'hergmes'
+                          ? 'Hergmes relay URL'
+                          : feedModeInput === 'explorer'
+                            ? 'Ergo Explorer API URL'
+                            : 'Ergo GraphQL endpoint URL'
                       "
                       type="text"
                       :placeholder="
-                        feedModeInput === 'explorer'
-                          ? zc.defaultExplorerUrl
-                          : zc.defaultGraphqlUrl
+                        feedModeInput === 'hergmes'
+                          ? zc.defaultHergmesUrl || DEFAULT_MAINNET_HERGMES_URL
+                          : feedModeInput === 'explorer'
+                            ? zc.defaultExplorerUrl
+                            : zc.defaultGraphqlUrl
                       "
                       class="sf-mono w-full bg-transparent text-[11.5px] text-[color:var(--sf-ink)] placeholder-[color:var(--sf-dim)] outline-none"
                     />
                   </div>
+
+                  <p
+                    v-if="hergmesUrlInvalid"
+                    class="text-[10.5px] text-[color:var(--sf-warn)]"
+                  >
+                    Enter a valid http:// or https:// Hergmes relay URL.
+                  </p>
 
                   <!-- Quick Endpoint Presets -->
                   <div class="flex flex-wrap items-center gap-1.5">
@@ -612,7 +741,8 @@ const navItems = [
                     </button>
                     <button
                       type="submit"
-                      class="sf-btn-cobalt rounded-full px-4 py-1.5 text-[11.5px]"
+                      :disabled="hergmesUrlInvalid"
+                      class="sf-btn-cobalt rounded-full px-4 py-1.5 text-[11.5px] disabled:cursor-not-allowed disabled:opacity-45"
                     >
                       Apply
                     </button>
@@ -620,17 +750,57 @@ const navItems = [
                 </form>
 
                 <div
-                  class="mt-3 space-y-1 border-t border-[color:var(--sf-line)] pt-2.5 text-[11px] text-[color:var(--sf-muted)]"
+                  class="mt-3 space-y-1.5 border-t border-[color:var(--sf-line)] pt-2.5 text-[11px] text-[color:var(--sf-muted)]"
                 >
                   <div class="flex items-center justify-between gap-2">
-                    <span class="truncate">{{
-                      zc.connected
-                        ? `${zc.network} · ${zc.dataSource === "graphql" ? "GraphQL" : "Explorer"}`
-                        : zc.error || "Offline"
-                    }}</span>
+                    <span class="truncate">
+                      <template v-if="zc.dataSource === 'hergmes'">
+                        {{ zc.network }} · Hergmes WS ({{ hergmesPhaseLabel }})
+                      </template>
+                      <template v-else-if="zc.connected">
+                        {{ zc.network }} · {{ zc.dataSource === "graphql" ? "GraphQL" : "Explorer" }}
+                      </template>
+                      <template v-else>
+                        {{ zc.error || "Offline" }}
+                      </template>
+                    </span>
                     <span v-if="zc.connected" class="sf-mono shrink-0">
                       #{{ zc.height.toLocaleString("en-US") }}
                     </span>
+                  </div>
+                  <div
+                    v-if="zc.dataSource === 'hergmes'"
+                    class="flex items-center justify-between gap-2 text-[10.5px]"
+                  >
+                    <span class="truncate text-[color:var(--sf-dim)]">
+                      History &amp; spent boxes via Explorer API
+                    </span>
+                    <span
+                      v-if="zc.mempoolActive && zc.streamPhase === 'live'"
+                      class="sf-mono shrink-0 rounded bg-[color:var(--sf-bid-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold text-[color:var(--sf-bid)]"
+                    >
+                      Mempool active
+                    </span>
+                  </div>
+                  <div
+                    v-if="zc.dataSource === 'hergmes' && (zc.streamError || (!zc.connected && !zc.loading))"
+                    class="space-y-1.5 rounded-lg border border-[color:var(--sf-line-ask)] bg-[color:var(--sf-ask-soft)]/60 px-2.5 py-2 text-[10.5px] text-[color:var(--sf-ask)]"
+                  >
+                    <div class="sf-mono font-semibold">
+                      {{
+                        zc.streamError
+                          ? `${zc.streamError.code}: ${zc.streamError.message}`
+                          : zc.error || "Hergmes relay offline"
+                      }}
+                    </div>
+                    <button
+                      v-if="zc.streamPhase === 'rejected' || (!zc.connected && !zc.loading)"
+                      type="button"
+                      class="sf-mono rounded bg-[color:var(--sf-card)] px-2 py-0.5 text-[10px] font-semibold text-[color:var(--sf-ink)] hover:underline"
+                      @click="fallbackToExplorer"
+                    >
+                      Switch to Explorer API
+                    </button>
                   </div>
                   <div v-if="zc.connected && !zc.oracle.missing" class="sf-mono flex justify-between">
                     <span>ERG/USD Oracle</span>
@@ -667,8 +837,14 @@ const navItems = [
             v-else
             type="button"
             class="sf-mono inline-flex h-8 items-center gap-2 rounded-full border border-[color:var(--sf-line-cobalt)] bg-[color:var(--sf-cobalt-soft)] px-3 text-[11.5px] font-semibold text-[color:var(--sf-cobalt)] transition-all hover:brightness-110"
+            :title="walletPendingTooltip"
             @click="wallet.disconnect()"
           >
+            <span
+              v-if="wallet.hasPendingTx"
+              class="sf-live-dot is-warn"
+              aria-label="Pending mempool transaction"
+            />
             <span>{{ ergBalance }} ERG</span>
             <span class="hidden opacity-75 sm:inline">
               {{ shortenString(wallet.changeAddress, 9) }}

@@ -429,13 +429,18 @@ async function readBoxesForTx(
   }
 
   if (toFetch.length > 0) {
-    const fetched = await ctx.client.fetchBoxesByIds(toFetch);
+    const useSpendable = fresh && typeof ctx.client.fetchSpendableBoxesByIds === "function";
+    const fetched = useSpendable
+      ? await ctx.client.fetchSpendableBoxesByIds!(toFetch)
+      : await ctx.client.fetchBoxesByIds(toFetch);
     for (const id of toFetch) {
       const box = fetched.get(id);
       if (!box) {
         if (fresh) {
           throw new ZcTxConflictError(
-            `Box ${id.slice(0, 10)}… is no longer unspent or could not be found on chain.`
+            useSpendable
+              ? `Box ${id.slice(0, 10)}… is no longer unspent (may already be spent in the mempool).`
+              : `Box ${id.slice(0, 10)}… is no longer unspent or could not be found on chain.`
           );
         }
         throw new ZcTxRefusalError(`No unspent box found with id ${id}.`);
@@ -2443,11 +2448,27 @@ export async function signAndSubmitZcAction(
   const signedTx = await deps.wallet.signTx(built.unsignedTx, {
     signers: built.signers
   });
-  const txId = await deps.wallet.submitTx(signedTx);
-  return {
-    txId,
-    action: built.action,
-    built,
-    warnings: built.quote.warnings
-  };
+  try {
+    const txId = await deps.wallet.submitTx(signedTx);
+    return {
+      txId,
+      action: built.action,
+      built,
+      warnings: built.quote.warnings
+    };
+  } catch (submitErr) {
+    if (deps.checkTransaction) {
+      try {
+        const check = await deps.checkTransaction(signedTx);
+        if (!check.ok) {
+          throw new ZcTxConflictError(
+            `Transaction rejected (${check.reason}): ${check.message}`
+          );
+        }
+      } catch (checkErr) {
+        if (checkErr instanceof ZcTxConflictError) throw checkErr;
+      }
+    }
+    throw submitErr;
+  }
 }

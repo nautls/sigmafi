@@ -1,4 +1,5 @@
 import { Network } from "@fleet-sdk/common";
+import type { HergmesStreamPhase } from "./zc/chainClient";
 import { ZcApiError } from "./zc/errors";
 import {
   DEFAULT_MAINNET_EXPLORER_URL,
@@ -10,6 +11,12 @@ import {
   DEFAULT_TESTNET_GRAPHQL_URL,
   SIGMASPACE_GRAPHQL_URL
 } from "./zc/graphqlClient";
+import {
+  DEFAULT_MAINNET_HERGMES_URL,
+  HergmesStreamError,
+  isValidHergmesUrl,
+  normalizeHergmesUrl
+} from "./zc/hergmesClient";
 import { ZcGraphqlEngine, ZcWalletProvider } from "./zc/reads";
 import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import {
@@ -55,18 +62,22 @@ import {
 
 export {
   ZcApiError,
+  DEFAULT_MAINNET_HERGMES_URL,
   DEFAULT_MAINNET_EXPLORER_URL,
   OFFICIAL_MAINNET_EXPLORER_URL,
   DEFAULT_TESTNET_EXPLORER_URL,
   DEFAULT_MAINNET_GRAPHQL_URL,
   SIGMASPACE_GRAPHQL_URL,
-  DEFAULT_TESTNET_GRAPHQL_URL
+  DEFAULT_TESTNET_GRAPHQL_URL,
+  isValidHergmesUrl,
+  normalizeHergmesUrl
 };
-export type { ZcWalletProvider };
+export type { HergmesStreamError, HergmesStreamPhase, ZcWalletProvider };
 
-export type ZcDataSource = "explorer" | "graphql" | "lithos";
+export type ZcDataSource = "hergmes" | "explorer" | "graphql" | "lithos";
 
 const DATA_SOURCE_KEY = "sigmafi.zc.dataSource";
+const HERGMES_URL_KEY = "sigmafi.zc.hergmesUrl";
 const EXPLORER_URL_KEY = "sigmafi.zc.explorerUrl";
 const GRAPHQL_URL_KEY = "sigmafi.zc.graphqlUrl";
 const BASE_URL_KEY = "sigmafi.zc.baseUrl";
@@ -104,6 +115,39 @@ export interface ZcTokenMeta {
   } | null;
 }
 
+export function getDefaultZcHergmesUrl(): string {
+  const envUrl = import.meta.env.VITE_HERGMES_URL;
+  if (typeof envUrl === "string" && envUrl.trim()) return normalizeHergmesUrl(envUrl);
+  return getNetworkType() === Network.Mainnet ? DEFAULT_MAINNET_HERGMES_URL : "";
+}
+
+export function getZcHergmesUrl(): string {
+  try {
+    const stored = localStorage.getItem(HERGMES_URL_KEY);
+    if (stored !== null && stored.trim()) return normalizeHergmesUrl(stored);
+  } catch {
+    // storage unavailable
+  }
+  return getDefaultZcHergmesUrl();
+}
+
+export function setZcHergmesUrl(url: string): void {
+  const clean = normalizeHergmesUrl(url);
+  try {
+    if (clean) localStorage.setItem(HERGMES_URL_KEY, clean);
+    else localStorage.removeItem(HERGMES_URL_KEY);
+  } catch {
+    // storage unavailable
+  }
+  const effective = clean || getDefaultZcHergmesUrl();
+  if (getZcDataSource() === "hergmes" && isValidHergmesUrl(effective)) {
+    zcGraphqlEngine.setTransport("hergmes", effective, {
+      transport: "explorer",
+      endpoint: getZcExplorerUrl()
+    });
+  }
+}
+
 export function getDefaultZcExplorerUrl(): string {
   const envUrl = import.meta.env.VITE_ERGO_EXPLORER_URL;
   if (typeof envUrl === "string" && envUrl.trim()) return envUrl.trim();
@@ -123,22 +167,32 @@ export function getDefaultZcGraphqlUrl(): string {
 export function getZcDataSource(): ZcDataSource {
   try {
     const stored = localStorage.getItem(DATA_SOURCE_KEY);
+    if (stored === "hergmes") {
+      return isValidHergmesUrl(getZcHergmesUrl()) ? "hergmes" : "explorer";
+    }
     if (stored === "explorer" || stored === "graphql" || stored === "lithos") return stored;
   } catch {
     // storage unavailable
   }
-  return "explorer";
+  return isValidHergmesUrl(getDefaultZcHergmesUrl()) ? "hergmes" : "explorer";
 }
 
 export function setZcDataSource(source: ZcDataSource): void {
+  const target: ZcDataSource =
+    source === "hergmes" && !isValidHergmesUrl(getZcHergmesUrl()) ? "explorer" : source;
   try {
-    localStorage.setItem(DATA_SOURCE_KEY, source);
+    localStorage.setItem(DATA_SOURCE_KEY, target);
   } catch {
     // storage unavailable
   }
-  if (source === "explorer") {
+  if (target === "hergmes") {
+    zcGraphqlEngine.setTransport("hergmes", getZcHergmesUrl(), {
+      transport: "explorer",
+      endpoint: getZcExplorerUrl()
+    });
+  } else if (target === "explorer") {
     zcGraphqlEngine.setTransport("explorer", getZcExplorerUrl());
-  } else if (source === "graphql") {
+  } else if (target === "graphql") {
     zcGraphqlEngine.setTransport("graphql", getZcGraphqlUrl());
   }
 }
@@ -161,8 +215,12 @@ export function setZcExplorerUrl(url: string): void {
   } catch {
     // storage unavailable
   }
-  if (getZcDataSource() === "explorer") {
-    zcGraphqlEngine.setTransport("explorer", clean || getDefaultZcExplorerUrl());
+  const effective = clean || getDefaultZcExplorerUrl();
+  const source = getZcDataSource();
+  if (source === "explorer") {
+    zcGraphqlEngine.setTransport("explorer", effective);
+  } else if (source === "hergmes") {
+    zcGraphqlEngine.setHistoricalCompanion("explorer", effective);
   }
 }
 
@@ -229,8 +287,17 @@ export function setZcApiKey(key: string): void {
 
 const initialSource = getZcDataSource();
 export const zcGraphqlEngine = new ZcGraphqlEngine(
-  initialSource === "graphql" ? getZcGraphqlUrl() : getZcExplorerUrl(),
-  initialSource === "graphql" ? "graphql" : "explorer"
+  initialSource === "hergmes"
+    ? getZcHergmesUrl()
+    : initialSource === "graphql"
+      ? getZcGraphqlUrl()
+      : getZcExplorerUrl(),
+  initialSource === "hergmes"
+    ? "hergmes"
+    : initialSource === "graphql"
+      ? "graphql"
+      : "explorer",
+  { transport: "explorer", endpoint: getZcExplorerUrl() }
 );
 
 export function setZcWalletProvider(provider: ZcWalletProvider): void {

@@ -9,12 +9,18 @@ import {
   utxoSum
 } from "@fleet-sdk/common";
 import { ErgoAddress } from "@fleet-sdk/core";
+import type { Relay } from "@hergmes/sdk";
 import { EIP12ErgoAPI, SignedTransaction } from "@nautilus-js/eip12-types";
 import { acceptHMRUpdate, defineStore } from "pinia";
-import { computed, onBeforeMount, onUnmounted, ref, watch } from "vue";
+import { computed, onBeforeMount, onUnmounted, ref, shallowRef, watch } from "vue";
 import { useChainStore } from "./chainStore";
 import { ERG_TOKEN_ID } from "@/constants";
 import type { NautilusSignOptions } from "@/services/zc/tx/types";
+import {
+  EMPTY_WALLET_OVERLAY,
+  WalletOverlaySnapshot,
+  ZcWalletOverlayManager
+} from "@/services/zc/walletOverlay";
 import { AssetInfo } from "@/types";
 import { getNetworkType, showToast } from "@/utils";
 
@@ -50,6 +56,24 @@ export const useWalletStore = defineStore("wallet", () => {
   const _wallets = ref<{ [key: string]: boolean }>({});
   const _connectedWallet = ref<"nautilus" | "safew" | string | undefined>();
 
+  // Step 9: Hergmes live wallet mempool overlay state (shared Relay WebSocket)
+  const _hergmesRelay = shallowRef<Relay | null>(null);
+  const _overlay = shallowRef<WalletOverlaySnapshot>(EMPTY_WALLET_OVERLAY);
+  const _liveOverlaySeq = ref(0);
+
+  const _overlayManager = new ZcWalletOverlayManager((snap) => {
+    _overlay.value = snap;
+    _liveOverlaySeq.value += 1;
+
+    if (snap.complete && _connected.value) {
+      const liveBoxes = [...snap.spendableBoxes];
+      _boxes = liveBoxes;
+      _lastBoxFetch = Date.now();
+      updateBalances(liveBoxes);
+      _loading.value = false;
+    }
+  });
+
   // computed
   const balance = computed(() =>
     _balance.value.map((asset) => ({
@@ -82,10 +106,43 @@ export const useWalletStore = defineStore("wallet", () => {
   const wallets = computed(() => _wallets.value);
   const connectedWallet = computed(() => _connectedWallet.value);
 
+  const pendingBalance = computed<ReadonlyMap<string, bigint>>(
+    () => _overlay.value.pendingBalance
+  );
+  const hasPendingTx = computed(() => _overlay.value.hasPendingTx);
+  const liveOverlayActive = computed(() => _overlay.value.complete);
+  const liveOverlaySeq = computed(() => _liveOverlaySeq.value);
+
+  function attachHergmesRelay(relay: Relay | null) {
+    if (_hergmesRelay.value === relay) return;
+    _hergmesRelay.value = relay;
+  }
+
+  // Sync live Hergmes wallet address subscriptions whenever connection, addresses, or relay change
+  watch(
+    [connected, changeAddress, usedAddresses, unusedAddresses, _hergmesRelay],
+    ([isConn, change, used, unused, relay]) => {
+      if (isConn && relay && (change || used.length > 0 || unused.length > 0)) {
+        _overlayManager.sync(relay, {
+          changeAddress: change,
+          usedAddresses: used,
+          unusedAddresses: unused
+        });
+      } else {
+        _overlayManager.clear();
+      }
+    },
+    { immediate: true }
+  );
+
   // watchers
   watch(
     () => chain.height,
-    () => getBoxes()
+    () => {
+      if (!liveOverlayActive.value) {
+        void getBoxes();
+      }
+    }
   );
 
   watch(balance, () => {
@@ -160,6 +217,7 @@ export const useWalletStore = defineStore("wallet", () => {
 
     _loading.value = true;
     localStorage.removeItem("connectedWallet");
+    _overlayManager.clear();
     _context = undefined;
     _usedAddresses.value = [];
     _unusedAddresses.value = [];
@@ -188,16 +246,28 @@ export const useWalletStore = defineStore("wallet", () => {
     _unusedAddresses.value = unused;
     _changeAddress.value = change;
 
-    _balance.value = [{ tokenId: ERG_TOKEN_ID, amount: ensureBigInt(ergBalance) }];
+    if (!_overlay.value.complete) {
+      _balance.value = [{ tokenId: ERG_TOKEN_ID, amount: ensureBigInt(ergBalance) }];
+    }
 
-    if (chain.height > 0) {
-      getBoxes();
+    if (chain.height > 0 && !_overlay.value.complete) {
+      void getBoxes();
     }
   }
 
   async function getBoxes(force = false) {
     if (!_context) {
       return [];
+    }
+
+    // Serve Hergmes live mempool-aware spendable UTXOs directly when full wallet coverage is live.
+    if (!force && _overlay.value.complete) {
+      const liveBoxes = [..._overlay.value.spendableBoxes];
+      _boxes = liveBoxes;
+      _lastBoxFetch = Date.now();
+      updateBalances(liveBoxes);
+      _loading.value = false;
+      return _boxes;
     }
 
     if (!force && _boxes.length > 0 && Date.now() - _lastBoxFetch < 20000) {
@@ -295,6 +365,7 @@ export const useWalletStore = defineStore("wallet", () => {
   return {
     connect,
     disconnect,
+    attachHergmesRelay,
     getBoxes,
     getChangeAddress,
     getUsedAddresses,
@@ -306,6 +377,10 @@ export const useWalletStore = defineStore("wallet", () => {
     connectedWallet,
     loading,
     balance,
+    pendingBalance,
+    hasPendingTx,
+    liveOverlayActive,
+    liveOverlaySeq,
     changeAddress,
     connected,
     usedAddresses,

@@ -1,3 +1,4 @@
+import { SignedTransaction } from "@fleet-sdk/common";
 import { ChainBox, ZcOracle } from "./boxes";
 
 export interface ChainState {
@@ -5,6 +6,31 @@ export interface ChainState {
   readonly blockId: string;
   readonly network: string;
 }
+
+export interface LiveZcSnapshot {
+  readonly state: ChainState;
+  readonly confirmedOracle: ZcOracle | null;
+  readonly refreshPending: boolean;
+  readonly confirmedBoxes: readonly ChainBox[];
+  readonly pendingBoxes: readonly ChainBox[];
+  readonly mempool: boolean;
+  readonly cut: boolean;
+  readonly fillsDirty: boolean;
+}
+
+export type HergmesStreamPhase =
+  | "idle"
+  | "connecting"
+  | "snapshot"
+  | "catching_up"
+  | "live"
+  | "waiting"
+  | "disconnected"
+  | "rejected";
+
+export type ZcTxCheckResult =
+  | { readonly ok: true; readonly txId: string }
+  | { readonly ok: false; readonly reason: string; readonly message: string };
 
 export interface ChainTxInput {
   readonly boxId: string;
@@ -58,6 +84,14 @@ export interface ZcChainClient {
     tokenIds: readonly string[],
     signal?: AbortSignal
   ): Promise<Map<string, GraphqlTokenInfo>>;
+  fetchSpendableBoxesByIds?(
+    boxIds: readonly string[],
+    signal?: AbortSignal
+  ): Promise<Map<string, ChainBox>>;
+  checkTransaction?(
+    signedTx: SignedTransaction,
+    signal?: AbortSignal
+  ): Promise<ZcTxCheckResult>;
 }
 
 /**

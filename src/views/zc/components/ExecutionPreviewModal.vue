@@ -293,9 +293,14 @@ async function executeSign() {
       "alert-success"
     );
     emit("submitted", ids);
-    void wallet.getBoxes(true);
-    void zc.refresh();
-    void zc.refreshPortfolio();
+    const hergmesLive = zc.dataSource === "hergmes" && zc.streamPhase === "live";
+    if (!wallet.liveOverlayActive) {
+      void wallet.getBoxes(true);
+    }
+    if (!hergmesLive) {
+      void zc.refresh();
+      void zc.refreshPortfolio();
+    }
   } catch (err) {
     batchProgress.value = null;
     errorMsg.value = formatNautilusError(err);
@@ -511,6 +516,13 @@ async function copyTxId(txId: string) {
                   </a>
                 </div>
               </div>
+            </div>
+
+            <div
+              v-if="zc.mempoolActive"
+              class="sf-mono text-[10.5px] text-[color:var(--sf-muted)]"
+            >
+              Live Hergmes mempool active — book &amp; wallet update automatically in ~1–2s.
             </div>
           </div>
 

@@ -3,6 +3,7 @@ import { first, isEmpty, NonMandatoryRegisters } from "@fleet-sdk/common";
 import { ErgoAddress } from "@fleet-sdk/core";
 import { utf8 } from "@fleet-sdk/crypto";
 import { parse } from "@fleet-sdk/serializer";
+import type { AssetType as HergmesAssetType } from "@hergmes/sdk";
 import BigNumber from "bignumber.js";
 import { uniq } from "lodash-es";
 import { defineStore } from "pinia";
@@ -12,6 +13,7 @@ import { ERG_DECIMALS, ERG_TOKEN_ID } from "@/constants";
 import { VERIFIED_ASSETS } from "@/maps/verifiedAssets";
 import { buildBondContract, buildOrderContract } from "@/offchain/plugins";
 import { graphQLService } from "@/services/graphqlService";
+import { zcGraphqlEngine } from "@/services/zcApi";
 import { AssetMetadata, AssetType } from "@/types";
 import { decimalizeBigNumber, getNetworkType, toDict } from "@/utils";
 
@@ -22,9 +24,25 @@ const CONTRACT_ADDRESSES = [
   ...VERIFIED_ASSETS.map((a) => buildBondContract(a.tokenId))
 ].map((contract) => ErgoAddress.fromErgoTree(contract).encode(getNetworkType()));
 
+function mapHergmesAssetType(type?: HergmesAssetType): AssetType | undefined {
+  switch (type) {
+    case "nft-picture":
+      return AssetType.PictureArtwork;
+    case "nft-audio":
+      return AssetType.AudioArtwork;
+    case "nft-video":
+      return AssetType.VideoArtwork;
+    case "membership-threshold-signature":
+      return AssetType.ThresholdSignature;
+    default:
+      return undefined;
+  }
+}
+
 export const useChainStore = defineStore("chain", () => {
   // private
-  let _timer: number;
+  let _timer: number | undefined;
+  let _tvlRequested = false;
 
   // private state
   const _loading = ref(true);
@@ -42,6 +60,11 @@ export const useChainStore = defineStore("chain", () => {
   const loading = computed(() => _loading.value);
   const height = computed(() => _height.value);
   const tvl = computed(() => {
+    if (!_tvlRequested) {
+      _tvlRequested = true;
+      void loadTVL();
+    }
+
     if (!_tvl.value || isEmpty(_tvl.value)) {
       return;
     }
@@ -59,6 +82,17 @@ export const useChainStore = defineStore("chain", () => {
     return acc.times(rates[ERG_TOKEN_ID].fiat);
   });
 
+  function isHergmesLive(): boolean {
+    const hc = zcGraphqlEngine.getHergmesClient();
+    return hc !== null && hc.getStreamPhase() === "live";
+  }
+
+  function syncExternalHeight(nextHeight: number) {
+    if (Number.isInteger(nextHeight) && nextHeight > 0 && _height.value !== nextHeight) {
+      _height.value = nextHeight;
+    }
+  }
+
   // watchers
   watch(
     height,
@@ -68,7 +102,9 @@ export const useChainStore = defineStore("chain", () => {
       }
 
       loadPriceRates();
-      loadTVL();
+      if (_tvlRequested) {
+        loadTVL();
+      }
     },
     { immediate: true }
   );
@@ -80,18 +116,37 @@ export const useChainStore = defineStore("chain", () => {
       _priceRates.value = JSON.parse(pricesStr);
     }
 
-    _height.value = (await graphQLService.getCurrentHeight()) || 0;
+    // When Hergmes WS is active, let live tip events drive height instead of polling GraphQL.
+    const hc = zcGraphqlEngine.getHergmesClient();
+    const hergmesTip = hc?.getTip()?.height;
+    if (hergmesTip && hergmesTip > 0) {
+      _height.value = hergmesTip;
+    } else if (zcGraphqlEngine.getTransport() !== "hergmes") {
+      _height.value = (await graphQLService.getCurrentHeight()) || 0;
+    }
 
-    _timer = setInterval(async () => {
-      const height = await graphQLService.getCurrentHeight();
-      if (height && _height.value !== height) {
-        _height.value = height;
+    _timer = window.setInterval(async () => {
+      const liveHc = zcGraphqlEngine.getHergmesClient();
+      if (liveHc && liveHc.getStreamPhase() === "live") {
+        const tipHeight = liveHc.getTip()?.height;
+        if (tipHeight && tipHeight > 0 && _height.value !== tipHeight) {
+          _height.value = tipHeight;
+        }
+        return;
+      }
+
+      const nextHeight = await graphQLService.getCurrentHeight();
+      if (nextHeight && _height.value !== nextHeight) {
+        _height.value = nextHeight;
       }
     }, 5000);
   });
 
   onBeforeUnmount(() => {
-    clearInterval(_timer);
+    if (_timer !== undefined) {
+      window.clearInterval(_timer);
+      _timer = undefined;
+    }
   });
 
   // actions
@@ -104,32 +159,59 @@ export const useChainStore = defineStore("chain", () => {
     }
 
     tokenIds = uniq(tokenIds);
+    let remaining = tokenIds;
 
-    for await (const tokensMetadata of graphQLService.streamTokenMetadata(tokenIds)) {
-      for (const metadata of tokensMetadata) {
-        const registers = metadata.box.additionalRegisters as NonMandatoryRegisters;
-
-        const parsedMetadata: AssetMetadata = {
-          name: metadata?.name || undefined,
-          decimals: metadata.decimals || undefined,
-          type:
-            registers?.R7 && registers.R7.startsWith("0e02") && registers.R7.length === 8
-              ? (registers.R7?.substring(4) as AssetType)
-              : undefined
-        };
-
-        if (parsedMetadata.type === AssetType.PictureArtwork && registers.R9) {
-          let r9 = parse<Uint8Array | Uint8Array[]>(registers.R9, "safe");
-          if (r9 instanceof Array) {
-            r9 = first(r9);
+    // Fast path: 100-per-batch Hergmes REST token metadata when Hergmes is live
+    if (isHergmesLive()) {
+      const relay = zcGraphqlEngine.getHergmesClient()?.getRelay();
+      if (relay) {
+        try {
+          const { items } = await relay.rest.tokens(tokenIds);
+          const resolved = new Set<string>();
+          for (const item of items) {
+            const low = item.tokenId.toLowerCase();
+            resolved.add(low);
+            _metadata.value[low] = {
+              name: item.name || undefined,
+              decimals: item.decimals != null ? item.decimals : undefined,
+              type: mapHergmesAssetType(item.type),
+              url: item.artworkUrl || undefined
+            };
           }
-
-          if (r9) {
-            parsedMetadata.url = utf8.encode(r9);
-          }
+          remaining = tokenIds.filter((id) => !resolved.has(id.toLowerCase()));
+        } catch {
+          // Fall back to GraphQL metadata stream below
         }
+      }
+    }
 
-        _metadata.value[metadata.tokenId] = parsedMetadata;
+    if (remaining.length > 0) {
+      for await (const tokensMetadata of graphQLService.streamTokenMetadata(remaining)) {
+        for (const metadata of tokensMetadata) {
+          const registers = metadata.box.additionalRegisters as NonMandatoryRegisters;
+
+          const parsedMetadata: AssetMetadata = {
+            name: metadata?.name || undefined,
+            decimals: metadata.decimals || undefined,
+            type:
+              registers?.R7 && registers.R7.startsWith("0e02") && registers.R7.length === 8
+                ? (registers.R7?.substring(4) as AssetType)
+                : undefined
+          };
+
+          if (parsedMetadata.type === AssetType.PictureArtwork && registers.R9) {
+            let r9 = parse<Uint8Array | Uint8Array[]>(registers.R9, "safe");
+            if (r9 instanceof Array) {
+              r9 = first(r9);
+            }
+
+            if (r9) {
+              parsedMetadata.url = utf8.encode(r9);
+            }
+          }
+
+          _metadata.value[metadata.tokenId] = parsedMetadata;
+        }
       }
     }
 
@@ -151,6 +233,7 @@ export const useChainStore = defineStore("chain", () => {
 
   return {
     loadTokensMetadata,
+    syncExternalHeight,
     tokensMetadata,
     priceRates,
     loading,

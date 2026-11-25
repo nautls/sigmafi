@@ -112,6 +112,8 @@ export function buildMarketBook(params: {
   revision: number;
   cut: boolean;
   entries: ReadonlyMap<string, ZcEntry>;
+  pendingRecords?: ReadonlyMap<string, ZcRecord>;
+  mempool?: boolean;
   confirmedOracle: ZcOracle | null;
   refreshPending?: boolean;
 }): ZcMarketBook {
@@ -126,30 +128,29 @@ export function buildMarketBook(params: {
   const byBoxId = new Map<string, ZcOpen<ZcRecord>>();
   const stateBuckets = new Map<string, ZcOpen<ZcRecord>[]>();
 
-  for (const entry of params.entries.values()) {
-    const r = entry.record;
-    const open = openOf(r, false);
+  const addRecord = (r: ZcRecord, pending: boolean) => {
+    const open = openOf(r, pending);
     allOpen.push(open);
     byBoxId.set(r.boxId, open);
 
     switch (r.recordType) {
       case "order":
-        orders.push(openOf(r, false));
+        orders.push(open as ZcOpen<ZcOrder>);
         break;
       case "ask":
-        asks.push(openOf(r, false));
+        asks.push(open as ZcOpen<ZcAsk>);
         break;
       case "offer":
-        offers.push(openOf(r, false));
+        offers.push(open as ZcOpen<ZcOffer>);
         break;
       case "lot":
-        lots.push(openOf(r, false));
+        lots.push(open as ZcOpen<ZcLot>);
         break;
       case "shareRequest":
-        shareRequests.push(openOf(r, false));
+        shareRequests.push(open as ZcOpen<ZcShareRequest>);
         break;
       case "wrapRequest":
-        wrapRequests.push(openOf(r, false));
+        wrapRequests.push(open as ZcOpen<ZcWrapRequest>);
         break;
       default:
         if (isStateKind(r.script.kind)) {
@@ -161,6 +162,17 @@ export function buildMarketBook(params: {
           }
         }
         break;
+    }
+  };
+
+  for (const entry of params.entries.values()) {
+    addRecord(entry.record, false);
+  }
+
+  if (params.pendingRecords) {
+    for (const [boxId, record] of params.pendingRecords) {
+      if (params.entries.has(boxId) || byBoxId.has(record.boxId)) continue;
+      addRecord(record, true);
     }
   }
 
@@ -203,7 +215,7 @@ export function buildMarketBook(params: {
     blockId: params.blockId,
     revision: params.revision,
     cut: params.cut,
-    mempool: false,
+    mempool: params.mempool ?? false,
     entries: params.entries,
     confirmedOracle: params.confirmedOracle,
     refreshPending,

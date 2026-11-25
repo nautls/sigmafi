@@ -12,7 +12,7 @@ import {
   SignedTransaction
 } from "@fleet-sdk/common";
 import { ChainAsset } from "../boxes";
-import { ZcChainClient } from "../chainClient";
+import { ZcChainClient, ZcTxCheckResult } from "../chainClient";
 import { ZcMarketBook, ZcMatcher } from "../matcher";
 import { ZcResolver } from "../resolver";
 import { ZcMarket } from "@/types/zc";
@@ -191,6 +191,8 @@ export interface ZcTxDeps {
   getReadContext(force?: boolean, signal?: AbortSignal): Promise<ZcTxReadContext>;
   /** Optional predicate identifying raw capability / LithosDex provision NFTs that must be wrapped first. */
   isCapabilityToken?(tokenId: string): boolean;
+  /** Optional dry-run tx validator (e.g. Hergmes `POST /v1/transactions?broadcast=false`). */
+  checkTransaction?(signedTx: SignedTransaction, signal?: AbortSignal): Promise<ZcTxCheckResult>;
 }
 
 /** Action refused by protocol rules or wallet constraints (e.g., expired, missing auth box, pull required). */

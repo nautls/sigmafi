@@ -18,6 +18,7 @@ import ZcAssetChip from "./components/ZcAssetChip.vue";
 import ZcOrderMark from "./components/ZcOrderMark.vue";
 import AssetIcon from "@/components/AssetIcon.vue";
 import MarketCoin from "@/components/MarketCoin.vue";
+import { ERG_TOKEN_ID } from "@/constants";
 import { useWalletStore, useZcStore } from "@/stories";
 import {
   ZcAskSummary,
@@ -46,7 +47,8 @@ import {
   pricingName,
   resolvedAskQuote,
   shareTotalOf,
-  signedFormat
+  signedFormat,
+  SIGUSD_TOKEN_ID
 } from "@/utils/zcMath";
 
 const zc = useZcStore();
@@ -73,6 +75,34 @@ function syncPortfolio() {
   void wallet.getBoxes(true);
   void zc.refresh();
   void zc.refreshPortfolio();
+}
+
+function onTxSubmitted() {
+  if (zc.dataSource === "hergmes" && zc.streamPhase === "live" && wallet.liveOverlayActive) {
+    return;
+  }
+  syncPortfolio();
+}
+
+const pendingErgDelta = computed<number | null>(() => {
+  const raw = wallet.pendingBalance.get(ERG_TOKEN_ID) ?? 0n;
+  return raw === 0n ? null : Number(raw) / 1e9;
+});
+
+const pendingSigUsdDelta = computed<number | null>(() => {
+  const raw = wallet.pendingBalance.get(SIGUSD_TOKEN_ID) ?? 0n;
+  return raw === 0n ? null : Number(raw) / 100;
+});
+
+function pendingTokenDelta(tokenId: string, decimals: number): number | null {
+  const raw = wallet.pendingBalance.get(tokenId.toLowerCase()) ?? 0n;
+  if (raw === 0n) return null;
+  return Number(raw) / Math.pow(10, Math.max(0, decimals));
+}
+
+function formatPendingChip(delta: number, maxDecimals: number): string {
+  const sign = delta > 0 ? "+" : "-";
+  return `${sign}${formatNumber(Math.abs(delta), maxDecimals, 0)} pending`;
 }
 
 watch(
@@ -1595,9 +1625,17 @@ function previewUnwrap(w: ZcPortfolioWrap) {
 
           <!-- Wallet Token Inventory -->
           <div class="space-y-2">
-            <span class="sf-mono block text-[10.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
-              Wallet Balances
-            </span>
+            <div class="flex items-center justify-between gap-2">
+              <span class="sf-mono block text-[10.5px] font-semibold uppercase tracking-[0.09em] text-[color:var(--sf-muted)]">
+                Wallet Balances
+              </span>
+              <span
+                v-if="wallet.hasPendingTx"
+                class="sf-mono rounded bg-[color:var(--sf-warn-soft)] px-1.5 py-0.5 text-[9.5px] font-semibold text-[color:var(--sf-warn)]"
+              >
+                Mempool pending
+              </span>
+            </div>
             <div class="grid grid-cols-1 gap-2 sm:grid-cols-2 lg:grid-cols-3">
               <div class="flex items-center justify-between rounded-xl border border-[color:var(--sf-line)] bg-[color:var(--sf-well-soft)] px-3 py-2">
                 <div class="flex items-center gap-2">
@@ -1607,6 +1645,13 @@ function previewUnwrap(w: ZcPortfolioWrap) {
                 <div class="sf-mono text-right">
                   <div class="text-[12.5px] font-bold text-[color:var(--sf-ink)]">
                     {{ formatNumber(zc.portfolio.walletErg, 3, 0) }}
+                  </div>
+                  <div
+                    v-if="pendingErgDelta !== null"
+                    class="text-[9.5px] font-semibold"
+                    :class="pendingErgDelta > 0 ? 'text-[color:var(--sf-bid)]' : 'text-[color:var(--sf-warn)]'"
+                  >
+                    {{ formatPendingChip(pendingErgDelta, 3) }}
                   </div>
                   <div class="text-[10px] text-[color:var(--sf-muted)]">
                     ${{ formatNumber(zc.portfolio.walletErg * oraclePrice, 2, 0) }}
@@ -1622,6 +1667,13 @@ function previewUnwrap(w: ZcPortfolioWrap) {
                 <div class="sf-mono text-right">
                   <div class="text-[12.5px] font-bold text-[color:var(--sf-ink)]">
                     {{ formatNumber(zc.portfolio.walletSigUsd, 2, 2) }}
+                  </div>
+                  <div
+                    v-if="pendingSigUsdDelta !== null"
+                    class="text-[9.5px] font-semibold"
+                    :class="pendingSigUsdDelta > 0 ? 'text-[color:var(--sf-bid)]' : 'text-[color:var(--sf-warn)]'"
+                  >
+                    {{ formatPendingChip(pendingSigUsdDelta, 2) }}
                   </div>
                   <div class="text-[10px] text-[color:var(--sf-muted)]">
                     ${{ formatNumber(zc.portfolio.walletSigUsd, 2, 0) }}
@@ -1643,6 +1695,17 @@ function previewUnwrap(w: ZcPortfolioWrap) {
                 <div class="sf-mono shrink-0 text-right">
                   <div class="text-[12.5px] font-bold text-[color:var(--sf-ink)]">
                     {{ formatNumber(t.amount, Math.min(4, t.decimals), 0) }}
+                  </div>
+                  <div
+                    v-if="pendingTokenDelta(t.id, t.decimals) !== null"
+                    class="text-[9.5px] font-semibold"
+                    :class="
+                      (pendingTokenDelta(t.id, t.decimals) ?? 0) > 0
+                        ? 'text-[color:var(--sf-bid)]'
+                        : 'text-[color:var(--sf-warn)]'
+                    "
+                  >
+                    {{ formatPendingChip(pendingTokenDelta(t.id, t.decimals) ?? 0, Math.min(4, t.decimals)) }}
                   </div>
                   <div v-if="t.usd && t.usd > 0" class="text-[10px] text-[color:var(--sf-muted)]">
                     ${{ formatNumber(t.amount * t.usd, 2, 0) }}
@@ -1680,7 +1743,7 @@ function previewUnwrap(w: ZcPortfolioWrap) {
         v-if="previewPayload"
         :payload="previewPayload"
         @close="previewPayload = null"
-        @submitted="syncPortfolio"
+        @submitted="onTxSubmitted"
       />
     </transition>
   </div>

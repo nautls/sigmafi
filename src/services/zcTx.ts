@@ -57,6 +57,13 @@ export function createZcTxDeps(wallet: ReturnType<typeof useWalletStore>): ZcTxD
     wallet: adapter,
     getReadContext(force = false, signal?: AbortSignal) {
       return zcGraphqlEngine.getTxReadContext(force, signal);
+    },
+    checkTransaction(signedTx, signal?: AbortSignal) {
+      const hc = zcGraphqlEngine.getHergmesClient();
+      if (!hc || !hc.getEndpoint()) {
+        return Promise.resolve({ ok: true, txId: signedTx.id ?? "" });
+      }
+      return hc.checkTransaction(signedTx, signal);
     }
   };
 }

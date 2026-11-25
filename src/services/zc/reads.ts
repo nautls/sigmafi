@@ -14,7 +14,7 @@ import {
   ZcRecord,
   ZcShareVault
 } from "./boxes";
-import { ChainTransaction, ZcChainClient } from "./chainClient";
+import { ChainTransaction, LiveZcSnapshot, ZcChainClient } from "./chainClient";
 import {
   getZcScript,
   getZcScriptAddress,
@@ -32,6 +32,7 @@ import { simulateDraft } from "./drafts";
 import { ZcApiError } from "./errors";
 import { DEFAULT_MAINNET_EXPLORER_URL, ZcExplorerClient } from "./explorerClient";
 import { DEFAULT_MAINNET_GRAPHQL_URL, ZcGraphqlClient } from "./graphqlClient";
+import { DEFAULT_MAINNET_HERGMES_URL, ZcHergmesClient } from "./hergmesClient";
 import { buildAtMeta, toSafeNum, ZcJson, ZcKnown, ZcStanding } from "./json";
 import {
   buildMarketBook,
@@ -287,28 +288,81 @@ function searchedJson(sr: ZcSearched, here: number): Record<string, number> {
   };
 }
 
-export type ZcChainTransport = "explorer" | "graphql";
+export type ZcChainTransport = "hergmes" | "explorer" | "graphql";
+
+export interface ZcHistoricalCompanionConfig {
+  readonly transport?: "explorer" | "graphql";
+  readonly endpoint?: string;
+}
 
 export class ZcGraphqlEngine {
   private transport: ZcChainTransport;
   private client: ZcChainClient;
+  private hergmesClient: ZcHergmesClient | null = null;
+  private unsubHergmesLive: (() => void) | null = null;
+  private historicalTransport: "explorer" | "graphql";
+  private historicalEndpoint: string;
+  private liveStarted = false;
+  private liveBuildChain: Promise<void> = Promise.resolve();
+  private readonly snapshotListeners = new Set<() => void>();
   readonly resolver: ZcResolver;
   private walletProvider: ZcWalletProvider = () => EMPTY_WALLET;
   private snapshot: SnapshotState | null = null;
   private revision = 0;
   private inFlightRefresh: Promise<SnapshotState> | null = null;
   private fillsCache = new Map<string, RawFill[]>();
+  private fillsEpoch = 0;
+  private fillsDirty = true;
 
   constructor(
     endpoint = DEFAULT_MAINNET_EXPLORER_URL,
-    transport: ZcChainTransport = "explorer"
+    transport: ZcChainTransport = "explorer",
+    historical?: ZcHistoricalCompanionConfig
   ) {
     this.transport = transport;
-    this.client =
-      transport === "graphql"
-        ? new ZcGraphqlClient(endpoint || DEFAULT_MAINNET_GRAPHQL_URL)
-        : new ZcExplorerClient(endpoint || DEFAULT_MAINNET_EXPLORER_URL);
+    this.historicalTransport = historical?.transport ?? "explorer";
+    this.historicalEndpoint =
+      historical?.endpoint?.trim() ||
+      (this.historicalTransport === "graphql"
+        ? DEFAULT_MAINNET_GRAPHQL_URL
+        : DEFAULT_MAINNET_EXPLORER_URL);
+    this.client = this.createTransportClient(transport, endpoint);
     this.resolver = new ZcResolver(() => this.client);
+  }
+
+  private buildHistoricalClient(): ZcChainClient {
+    return this.historicalTransport === "graphql"
+      ? new ZcGraphqlClient(this.historicalEndpoint || DEFAULT_MAINNET_GRAPHQL_URL)
+      : new ZcExplorerClient(this.historicalEndpoint || DEFAULT_MAINNET_EXPLORER_URL);
+  }
+
+  private createTransportClient(transport: ZcChainTransport, endpoint: string): ZcChainClient {
+    if (transport === "hergmes") {
+      const hc = new ZcHergmesClient(endpoint || DEFAULT_MAINNET_HERGMES_URL, {
+        historicalClient: this.buildHistoricalClient()
+      });
+      this.hergmesClient = hc;
+      this.unsubHergmesLive = hc.onLiveUpdate((liveSnap) => {
+        this.enqueueLiveSnapshot(hc, liveSnap);
+      });
+      return hc;
+    }
+    this.hergmesClient = null;
+    this.unsubHergmesLive = null;
+    return transport === "graphql"
+      ? new ZcGraphqlClient(endpoint || DEFAULT_MAINNET_GRAPHQL_URL)
+      : new ZcExplorerClient(endpoint || DEFAULT_MAINNET_EXPLORER_URL);
+  }
+
+  private teardownHergmes(): void {
+    if (this.unsubHergmesLive) {
+      this.unsubHergmesLive();
+      this.unsubHergmesLive = null;
+    }
+    if (this.hergmesClient) {
+      this.hergmesClient.dispose();
+      this.hergmesClient = null;
+    }
   }
 
   get gql(): ZcChainClient {
@@ -323,24 +377,103 @@ export class ZcGraphqlEngine {
     return this.client.getEndpoint();
   }
 
-  setTransport(transport: ZcChainTransport, endpoint: string): void {
+  getHergmesClient(): ZcHergmesClient | null {
+    return this.hergmesClient;
+  }
+
+  onSnapshotChange(listener: () => void): () => void {
+    this.snapshotListeners.add(listener);
+    return () => {
+      this.snapshotListeners.delete(listener);
+    };
+  }
+
+  hasFillsDirty(): boolean {
+    return this.fillsDirty;
+  }
+
+  consumeFillsDirty(): boolean {
+    const dirty = this.fillsDirty;
+    this.fillsDirty = false;
+    return dirty;
+  }
+
+  startLive(): void {
+    this.liveStarted = true;
+    if (this.transport === "hergmes" && this.hergmesClient) {
+      void this.hergmesClient.start();
+    }
+  }
+
+  stopLive(): void {
+    this.liveStarted = false;
+    if (this.hergmesClient) {
+      this.hergmesClient.close();
+    }
+  }
+
+  setHistoricalCompanion(transport: "explorer" | "graphql", endpoint: string): void {
     const fallback =
       transport === "graphql" ? DEFAULT_MAINNET_GRAPHQL_URL : DEFAULT_MAINNET_EXPLORER_URL;
     const clean = endpoint.trim() || fallback;
-    if (transport === this.transport && clean === this.client.getEndpoint()) return;
+    if (transport === this.historicalTransport && clean === this.historicalEndpoint) return;
+    this.historicalTransport = transport;
+    this.historicalEndpoint = clean;
+    if (this.hergmesClient) {
+      this.hergmesClient.setHistoricalClient(this.buildHistoricalClient());
+    }
+  }
+
+  setTransport(
+    transport: ZcChainTransport,
+    endpoint: string,
+    historical?: ZcHistoricalCompanionConfig
+  ): void {
+    if (historical) {
+      const hTransport = historical.transport ?? this.historicalTransport;
+      const hFallback =
+        hTransport === "graphql" ? DEFAULT_MAINNET_GRAPHQL_URL : DEFAULT_MAINNET_EXPLORER_URL;
+      this.historicalTransport = hTransport;
+      this.historicalEndpoint = historical.endpoint?.trim() || hFallback;
+    }
+
+    const fallback =
+      transport === "hergmes"
+        ? DEFAULT_MAINNET_HERGMES_URL
+        : transport === "graphql"
+          ? DEFAULT_MAINNET_GRAPHQL_URL
+          : DEFAULT_MAINNET_EXPLORER_URL;
+    const clean = endpoint.trim().replace(/\/+$/, "") || fallback;
+    if (transport === this.transport && clean === this.client.getEndpoint()) {
+      if (this.hergmesClient && historical) {
+        this.hergmesClient.setHistoricalClient(this.buildHistoricalClient());
+      }
+      return;
+    }
+
+    this.teardownHergmes();
     this.transport = transport;
-    this.client =
-      transport === "graphql" ? new ZcGraphqlClient(clean) : new ZcExplorerClient(clean);
+    this.client = this.createTransportClient(transport, clean);
     this.reset();
+    if (this.liveStarted && this.hergmesClient) {
+      void this.hergmesClient.start();
+    }
   }
 
   setEndpoint(url: string): void {
     const fallback =
-      this.transport === "graphql" ? DEFAULT_MAINNET_GRAPHQL_URL : DEFAULT_MAINNET_EXPLORER_URL;
-    const clean = url.trim() || fallback;
+      this.transport === "hergmes"
+        ? DEFAULT_MAINNET_HERGMES_URL
+        : this.transport === "graphql"
+          ? DEFAULT_MAINNET_GRAPHQL_URL
+          : DEFAULT_MAINNET_EXPLORER_URL;
+    const clean = url.trim().replace(/\/+$/, "") || fallback;
     if (clean === this.client.getEndpoint()) return;
     this.client.setEndpoint(clean);
     this.reset();
+    if (this.liveStarted && this.hergmesClient) {
+      void this.hergmesClient.start();
+    }
   }
 
   reset(): void {
@@ -348,11 +481,120 @@ export class ZcGraphqlEngine {
     this.revision = 0;
     this.inFlightRefresh = null;
     this.fillsCache.clear();
-    this.resolver.clear();
+    this.fillsEpoch++;
+    this.fillsDirty = true;
+    this.resolver.clearTransient();
   }
 
   setWalletProvider(provider: ZcWalletProvider): void {
     this.walletProvider = provider;
+  }
+
+  private emitSnapshotChange(): void {
+    for (const listener of this.snapshotListeners) {
+      try {
+        listener();
+      } catch {
+        // isolate listener errors
+      }
+    }
+  }
+
+  private enqueueLiveSnapshot(source: ZcHergmesClient, live: LiveZcSnapshot): void {
+    this.liveBuildChain = this.liveBuildChain
+      .then(async () => {
+        if (this.hergmesClient !== source) return;
+        const prevRev = this.revision;
+        const hadPrev = this.snapshot !== null;
+        await this.applyLiveSnapshot(live);
+        if (!hadPrev || this.revision !== prevRev || live.fillsDirty) {
+          this.emitSnapshotChange();
+        }
+      })
+      .catch(() => {
+        // fail-soft on background push warming
+      });
+  }
+
+  private async applyLiveSnapshot(
+    live: LiveZcSnapshot,
+    signal?: AbortSignal,
+    forceFillsDirty = false
+  ): Promise<SnapshotState> {
+    const prev = this.snapshot;
+    const entries = new Map<string, ZcEntry>();
+    for (const box of live.confirmedBoxes) {
+      const record = readZcBox(box);
+      if (record) {
+        entries.set(record.boxId, {
+          record,
+          height: box.settlementHeight || box.creationHeight
+        });
+      }
+    }
+
+    const pendingRecords = new Map<string, ZcRecord>();
+    for (const box of live.pendingBoxes) {
+      if (entries.has(box.boxId)) continue;
+      const record = readZcBox(box);
+      if (record) {
+        pendingRecords.set(record.boxId, record);
+      }
+    }
+
+    const network = live.state.network || "mainnet";
+    this.resolver.setNetwork(network);
+
+    const provisionalBook = buildMarketBook({
+      height: live.state.height,
+      blockId: live.state.blockId,
+      revision: this.revision,
+      cut: live.cut,
+      entries,
+      pendingRecords,
+      mempool: live.mempool,
+      confirmedOracle: live.confirmedOracle,
+      refreshPending: live.refreshPending
+    });
+
+    await this.resolver.warmForBook(provisionalBook, signal);
+
+    const sortedIds = Array.from(entries.keys()).sort();
+    const sortedPendingIds = Array.from(pendingRecords.keys()).sort();
+    const fp = `${live.state.blockId}|${live.confirmedOracle?.box.boxId ?? ""}|${
+      live.refreshPending ? "1" : "0"
+    }|${this.resolver.generation}|${sortedIds.join(",")}|p:${sortedPendingIds.join(",")}`;
+
+    if (!prev || prev.fingerprint !== fp) {
+      this.revision++;
+    }
+
+    const book = buildMarketBook({
+      height: live.state.height,
+      blockId: live.state.blockId,
+      revision: this.revision,
+      cut: live.cut,
+      entries,
+      pendingRecords,
+      mempool: live.mempool,
+      confirmedOracle: live.confirmedOracle,
+      refreshPending: live.refreshPending
+    });
+
+    if (live.fillsDirty || forceFillsDirty) {
+      this.fillsCache.clear();
+      this.fillsEpoch++;
+      this.fillsDirty = true;
+    }
+
+    const next: SnapshotState = {
+      book,
+      network,
+      fingerprint: fp,
+      batchRuns: new Map()
+    };
+    this.snapshot = next;
+    return next;
   }
 
   private walletState(): ZcWalletState {
@@ -392,11 +634,36 @@ export class ZcGraphqlEngine {
   }
 
   /**
-   * Refreshes chain state from Ergo GraphQL.
-   * Fast path: if `force` is false and tip `blockId` + oracle box have not moved since
-   * the current snapshot, skips the 22-tree UTXO scan completely.
+   * Refreshes chain state from Hergmes (realtime push), Ergo Explorer REST, or Ergo GraphQL.
+   * Fast path:
+   *  - In `"hergmes"` mode, serves the live in-memory snapshot without polling when live.
+   *  - In `"explorer"` / `"graphql"` modes, skips the 22-tree UTXO scan when tip `blockId`
+   *    and oracle box have not moved since the current snapshot.
    */
   async refresh(force = false, signal?: AbortSignal): Promise<SnapshotState> {
+    if (this.transport === "hergmes" && this.hergmesClient) {
+      if (!force && this.snapshot && this.hergmesClient.getStreamPhase() === "live") {
+        return this.snapshot;
+      }
+      if (this.inFlightRefresh && !force) return this.inFlightRefresh;
+
+      const source = this.hergmesClient;
+      const run = (async (): Promise<SnapshotState> => {
+        const liveSnap = await source.waitUntilReady(15_000, signal);
+        if (this.hergmesClient !== source) {
+          throw new ZcApiError("Chain transport changed while connecting.", 0);
+        }
+        return this.applyLiveSnapshot(liveSnap, signal, force);
+      })();
+
+      this.inFlightRefresh = run;
+      try {
+        return await run;
+      } finally {
+        if (this.inFlightRefresh === run) this.inFlightRefresh = null;
+      }
+    }
+
     if (this.inFlightRefresh && !force) return this.inFlightRefresh;
 
     const run = (async (): Promise<SnapshotState> => {
@@ -423,6 +690,9 @@ export class ZcGraphqlEngine {
           });
         }
       }
+
+      const network = state.network || "mainnet";
+      this.resolver.setNetwork(network);
 
       const sortedIds = Array.from(entries.keys()).sort();
       const provisionalBook = buildMarketBook({
@@ -453,11 +723,13 @@ export class ZcGraphqlEngine {
 
       if (prev && prev.book.blockId !== state.blockId) {
         this.fillsCache.clear();
+        this.fillsEpoch++;
+        this.fillsDirty = true;
       }
 
       const next: SnapshotState = {
         book,
-        network: state.network || "mainnet",
+        network,
         fingerprint: fp,
         batchRuns: new Map()
       };
@@ -1460,7 +1732,7 @@ export class ZcGraphqlEngine {
     fromHeight: number,
     signal?: AbortSignal
   ): Promise<RawFill[]> {
-    const cacheKey = `${snap.book.blockId}:${market}:${fromHeight}`;
+    const cacheKey = `${this.fillsEpoch}:${market}:${fromHeight}`;
     const hit = this.fillsCache.get(cacheKey);
     if (hit) return hit;
 

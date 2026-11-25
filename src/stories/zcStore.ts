@@ -1,7 +1,8 @@
 import { ErgoAddress } from "@fleet-sdk/core";
 import { blake2b256, hex } from "@fleet-sdk/crypto";
+import type { Relay } from "@hergmes/sdk";
 import { acceptHMRUpdate, defineStore } from "pinia";
-import { computed, reactive, ref, watch } from "vue";
+import { computed, reactive, ref, shallowRef, watch } from "vue";
 import { useChainStore } from "./chainStore";
 import { useWalletStore } from "./walletStore";
 import { ERG_TOKEN_ID } from "@/constants";
@@ -11,19 +12,26 @@ import {
   adaptPortfolio,
   getDefaultZcExplorerUrl,
   getDefaultZcGraphqlUrl,
+  getDefaultZcHergmesUrl,
   getZcBaseUrl,
   getZcDataSource,
   getZcExplorerUrl,
   getZcGraphqlUrl,
+  getZcHergmesUrl,
+  HergmesStreamError,
+  HergmesStreamPhase,
+  isValidHergmesUrl,
   resetZcEngine,
   setZcBaseUrl,
   setZcDataSource,
   setZcDemoProvider,
   setZcExplorerUrl,
   setZcGraphqlUrl,
+  setZcHergmesUrl,
   setZcWalletProvider,
   zcApi,
   ZcDataSource,
+  zcGraphqlEngine,
   ZcTokenMeta
 } from "@/services/zcApi";
 import {
@@ -49,6 +57,7 @@ import {
 const MARKET_STORAGE_KEY = "sigmafi.zc.market";
 const UNIT_STORAGE_KEY = "sigmafi.zc.unit";
 const POLL_MS = 20_000;
+const HERGMES_WATCHDOG_MS = 60_000;
 
 const ADDRESS_HASH_CACHE = new Map<string, string>();
 
@@ -94,16 +103,22 @@ export const useZcStore = defineStore("zc", () => {
   const revision = ref(0);
   const refreshSeq = ref(0);
   const dataSource = ref<ZcDataSource>(getZcDataSource());
+  const hergmesUrl = ref(getZcHergmesUrl());
+  const defaultHergmesUrl = getDefaultZcHergmesUrl();
   const explorerUrl = ref(getZcExplorerUrl());
   const defaultExplorerUrl = getDefaultZcExplorerUrl();
   const graphqlUrl = ref(getZcGraphqlUrl());
   const defaultGraphqlUrl = getDefaultZcGraphqlUrl();
   const baseUrl = ref(getZcBaseUrl());
+  const streamPhase = ref<HergmesStreamPhase>("idle");
+  const streamError = ref<HergmesStreamError | null>(null);
+  const mempoolActive = ref(false);
+  const hergmesRelay = shallowRef<Relay | null>(null);
   const searchQuery = ref("");
   const pendingSelect = ref<{ seq: number; type: "ask" | "bid"; id: string } | null>(null);
   const defaults = ref<Record<string, string | number>>({});
 
-  // Wire Nautilus wallet addresses & balances into the client-side GraphQL ZC engine
+  // Wire Nautilus wallet addresses & balances into the client-side ZC engine
   // so `mine`, `borrowedByMe`, and `getPortfolio()` reflect the connected wallet.
   setZcWalletProvider(() => {
     const hashes = new Set<string>();
@@ -335,7 +350,12 @@ export const useZcStore = defineStore("zc", () => {
 
   let pollTimer: number | null = null;
   let inFlight = false;
+  let pendingPushSync = false;
   let subscribers = 0;
+  let lastBlockId = "";
+  let unsubSnapshot: (() => void) | null = null;
+  let unsubPhase: (() => void) | null = null;
+  let walletOverlayRefreshTimer: number | null = null;
 
   const activeSnapshot = computed(() => markets[activeMarket.value]);
   const auctionsCount = computed(() => lots.value.length + vaults.value.length);
@@ -365,6 +385,103 @@ export const useZcStore = defineStore("zc", () => {
     );
   });
 
+  function clearEngineListeners() {
+    if (unsubSnapshot) {
+      unsubSnapshot();
+      unsubSnapshot = null;
+    }
+    if (unsubPhase) {
+      unsubPhase();
+      unsubPhase = null;
+    }
+  }
+
+  function syncRelayHandle() {
+    const hc = zcGraphqlEngine.getHergmesClient();
+    const relay =
+      dataSource.value === "hergmes" && hc && hc.isNetworkValidated() ? hc.getRelay() : null;
+    if (hergmesRelay.value !== relay) {
+      hergmesRelay.value = relay;
+    }
+  }
+
+  function bindEngineListeners() {
+    clearEngineListeners();
+    unsubSnapshot = zcGraphqlEngine.onSnapshotChange(() => {
+      if (dataSource.value !== "hergmes" || subscribers === 0) return;
+      if (inFlight) {
+        pendingPushSync = true;
+        return;
+      }
+      void poll(false);
+    });
+
+    const hc = zcGraphqlEngine.getHergmesClient();
+    if (dataSource.value === "hergmes" && hc) {
+      streamPhase.value = hc.getStreamPhase();
+      streamError.value = hc.getLastError();
+      syncRelayHandle();
+      unsubPhase = hc.onPhaseChange((phase, err) => {
+        streamPhase.value = phase;
+        streamError.value = err;
+        syncRelayHandle();
+        if (phase === "rejected" && err) {
+          error.value = err.message;
+          loading.value = false;
+        } else if (phase === "live") {
+          error.value = null;
+        }
+      });
+    } else {
+      streamPhase.value = "idle";
+      streamError.value = null;
+      mempoolActive.value = false;
+      hergmesRelay.value = null;
+    }
+  }
+
+  function configureSchedule() {
+    if (pollTimer !== null) {
+      window.clearInterval(pollTimer);
+      pollTimer = null;
+    }
+    if (subscribers === 0) return;
+
+    bindEngineListeners();
+
+    if (dataSource.value === "hergmes") {
+      zcGraphqlEngine.startLive();
+      syncRelayHandle();
+      pollTimer = window.setInterval(() => {
+        if (streamPhase.value !== "live") {
+          zcGraphqlEngine.startLive();
+          syncRelayHandle();
+          void poll(false);
+        }
+      }, HERGMES_WATCHDOG_MS);
+    } else {
+      zcGraphqlEngine.stopLive();
+      syncRelayHandle();
+      pollTimer = window.setInterval(() => {
+        void poll(false);
+      }, POLL_MS);
+    }
+  }
+
+  // Forward the shared Hergmes Relay to walletStore for Step 9's live mempool wallet overlay.
+  watch(
+    hergmesRelay,
+    (relay) => {
+      wallet.attachHergmesRelay(relay);
+    },
+    { immediate: true }
+  );
+
+  // Keep chainStore's height in sync with V2 tip so Step 8 avoids redundant GraphQL height polling.
+  watch(height, (h) => {
+    if (h > 0) chain.syncExternalHeight(h);
+  });
+
   function setActiveMarket(m: ZcMarket) {
     activeMarket.value = m;
     userPickedMarket.value = true;
@@ -387,8 +504,42 @@ export const useZcStore = defineStore("zc", () => {
   function updateDataSource(source: ZcDataSource) {
     setZcDataSource(source);
     dataSource.value = getZcDataSource();
+    hergmesUrl.value = getZcHergmesUrl();
     resetZcEngine();
     revision.value = 0;
+    lastBlockId = "";
+    loading.value = true;
+    error.value = null;
+    configureSchedule();
+    void poll(true);
+  }
+
+  function updateHergmesUrl(url: string) {
+    setZcHergmesUrl(url);
+    hergmesUrl.value = getZcHergmesUrl();
+    revision.value = 0;
+    lastBlockId = "";
+    if (dataSource.value === "hergmes") {
+      loading.value = true;
+      error.value = null;
+      configureSchedule();
+      void poll(true);
+    }
+  }
+
+  function applyHergmesFeed(url: string) {
+    const clean = url.trim();
+    if (!isValidHergmesUrl(clean || defaultHergmesUrl)) return;
+    setZcHergmesUrl(clean);
+    hergmesUrl.value = getZcHergmesUrl();
+    setZcDataSource("hergmes");
+    dataSource.value = getZcDataSource();
+    resetZcEngine();
+    revision.value = 0;
+    lastBlockId = "";
+    loading.value = true;
+    error.value = null;
+    configureSchedule();
     void poll(true);
   }
 
@@ -396,14 +547,18 @@ export const useZcStore = defineStore("zc", () => {
     setZcExplorerUrl(url);
     explorerUrl.value = getZcExplorerUrl();
     revision.value = 0;
-    void poll(true);
+    if (dataSource.value === "explorer") {
+      void poll(true);
+    }
   }
 
   function updateGraphqlUrl(url: string) {
     setZcGraphqlUrl(url);
     graphqlUrl.value = getZcGraphqlUrl();
     revision.value = 0;
-    void poll(true);
+    if (dataSource.value === "graphql") {
+      void poll(true);
+    }
   }
 
   function updateBaseUrl(url: string) {
@@ -417,9 +572,11 @@ export const useZcStore = defineStore("zc", () => {
     pendingSelect.value = { seq: Date.now(), type, id };
   }
 
-  async function fetchMarket(market: ZcMarket) {
+  async function fetchMarket(market: ZcMarket, refreshFills = true) {
     const covBps = DEFAULT_COVER * 100;
     const fromHeight = height.value > 0 ? Math.max(0, height.value - 5040) : 0;
+    const prev = markets[market];
+    const shouldFetchFills = refreshFills || prev.curves === null;
 
     const [curves, asks, offers, fills] = await Promise.all([
       zcApi.getCurves(market, {
@@ -440,11 +597,13 @@ export const useZcStore = defineStore("zc", () => {
         sort: "apr",
         limit: 40
       }),
-      zcApi.listFills(market, { fromHeight, limit: 100 }).catch(() => [])
+      shouldFetchFills
+        ? zcApi.listFills(market, { fromHeight, limit: 100 }).catch(() => prev.fills)
+        : Promise.resolve(prev.fills)
     ]);
 
-    let weightedFillAprBps: number | null = null;
-    if (fills.length > 0) {
+    let weightedFillAprBps: number | null = shouldFetchFills ? null : prev.weightedFillAprBps;
+    if (shouldFetchFills && fills.length > 0) {
       const vol = fills.reduce((acc, f) => acc + f.cost, 0);
       if (vol > 0) {
         weightedFillAprBps = fills.reduce((acc, f) => acc + f.cost * f.yieldBps, 0) / vol;
@@ -464,7 +623,10 @@ export const useZcStore = defineStore("zc", () => {
   }
 
   async function poll(force = false) {
-    if (inFlight) return;
+    if (inFlight) {
+      if (force) pendingPushSync = true;
+      return;
+    }
     inFlight = true;
     try {
       const ifRev = !force && connected.value && revision.value > 0 ? revision.value : undefined;
@@ -475,6 +637,9 @@ export const useZcStore = defineStore("zc", () => {
 
       const info = res as ZcInfoResponse;
       const prevRev = revision.value;
+      const nextBlockId = info.at?.blockId ?? "";
+      const blockMoved = nextBlockId !== "" && nextBlockId !== lastBlockId;
+      lastBlockId = nextBlockId;
 
       connected.value = true;
       loading.value = false;
@@ -484,8 +649,10 @@ export const useZcStore = defineStore("zc", () => {
       profile.value = info.profile || "zcs1";
       height.value = info.at?.height ?? 0;
       revision.value = info.at?.revision ?? 0;
+      mempoolActive.value = !!info.at?.mempool;
       if (info.defaults) defaults.value = info.defaults;
       setChainNowAnchor(height.value);
+      syncRelayHandle();
       if (force) refreshSeq.value += 1;
 
       if (info.oracle) {
@@ -503,9 +670,14 @@ export const useZcStore = defineStore("zc", () => {
       }
 
       if (force || revision.value !== prevRev || !markets.ERG.curves) {
+        const fillsDirty =
+          dataSource.value === "hergmes"
+            ? force || zcGraphqlEngine.consumeFillsDirty() || !markets.ERG.curves
+            : force || blockMoved || !markets.ERG.curves;
+
         const [, , auctions] = await Promise.all([
-          fetchMarket("ERG"),
-          fetchMarket("SigUSD"),
+          fetchMarket("ERG", fillsDirty),
+          fetchMarket("SigUSD", fillsDirty),
           demoMode.value
             ? Promise.resolve({ lots: demoData.value?.lots || [], vaults: demoData.value?.vaults || [] })
             : zcApi.listAuctions().catch(() => ({ lots: [], vaults: [] }))
@@ -561,14 +733,20 @@ export const useZcStore = defineStore("zc", () => {
       connected.value = false;
       loading.value = false;
       const fallbackMsg =
-        dataSource.value === "explorer"
-          ? "Ergo Explorer API unreachable"
-          : dataSource.value === "graphql"
-            ? "Ergo GraphQL unreachable"
-            : "Lithos client unreachable";
+        dataSource.value === "hergmes"
+          ? "Hergmes relay unreachable"
+          : dataSource.value === "explorer"
+            ? "Ergo Explorer API unreachable"
+            : dataSource.value === "graphql"
+              ? "Ergo GraphQL unreachable"
+              : "Lithos client unreachable";
       error.value = err instanceof Error ? err.message : fallbackMsg;
     } finally {
       inFlight = false;
+      if (pendingPushSync) {
+        pendingPushSync = false;
+        void poll(false);
+      }
     }
   }
 
@@ -584,9 +762,26 @@ export const useZcStore = defineStore("zc", () => {
     () => {
       if (connected.value && dataSource.value !== "lithos") {
         refreshSeq.value += 1;
-        void Promise.all([fetchMarket("ERG"), fetchMarket("SigUSD")]).catch(() => undefined);
+        void Promise.all([fetchMarket("ERG", false), fetchMarket("SigUSD", false)]).catch(
+          () => undefined
+        );
       }
       void refreshPortfolio();
+    }
+  );
+
+  // Step 9: Auto-refresh V2 portfolio when live Hergmes wallet boxes/balances update.
+  watch(
+    () => wallet.liveOverlaySeq,
+    () => {
+      if (!wallet.connected || !connected.value) return;
+      if (walletOverlayRefreshTimer !== null) {
+        window.clearTimeout(walletOverlayRefreshTimer);
+      }
+      walletOverlayRefreshTimer = window.setTimeout(() => {
+        walletOverlayRefreshTimer = null;
+        void refreshPortfolio();
+      }, 200);
     }
   );
 
@@ -594,18 +789,25 @@ export const useZcStore = defineStore("zc", () => {
     subscribers += 1;
     if (subscribers === 1) {
       if (demoMode.value) applyDemoData();
+      configureSchedule();
       void poll(false);
-      pollTimer = window.setInterval(() => {
-        void poll(false);
-      }, POLL_MS);
     }
   }
 
   function stop() {
     subscribers = Math.max(0, subscribers - 1);
-    if (subscribers === 0 && pollTimer !== null) {
-      window.clearInterval(pollTimer);
-      pollTimer = null;
+    if (subscribers === 0) {
+      if (pollTimer !== null) {
+        window.clearInterval(pollTimer);
+        pollTimer = null;
+      }
+      if (walletOverlayRefreshTimer !== null) {
+        window.clearTimeout(walletOverlayRefreshTimer);
+        walletOverlayRefreshTimer = null;
+      }
+      clearEngineListeners();
+      zcGraphqlEngine.stopLive();
+      hergmesRelay.value = null;
     }
   }
 
@@ -620,6 +822,12 @@ export const useZcStore = defineStore("zc", () => {
     revision,
     refreshSeq,
     dataSource,
+    hergmesUrl,
+    defaultHergmesUrl,
+    streamPhase,
+    streamError,
+    mempoolActive,
+    hergmesRelay,
     explorerUrl,
     defaultExplorerUrl,
     graphqlUrl,
@@ -647,6 +855,8 @@ export const useZcStore = defineStore("zc", () => {
     setDemoMode,
     toggleDemoMode,
     updateDataSource,
+    updateHergmesUrl,
+    applyHergmesFeed,
     updateExplorerUrl,
     updateGraphqlUrl,
     updateBaseUrl,

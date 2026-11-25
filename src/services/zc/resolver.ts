@@ -1,8 +1,8 @@
 import { blake2b256, hex } from "@fleet-sdk/crypto";
 import {
   ChainBox,
-  DISCLOSURE_VAR,
   disclosedTrees,
+  DISCLOSURE_VAR,
   isMinter,
   MAX_SCRIPT_CHARS,
   originOf,
@@ -11,15 +11,84 @@ import {
   ZcRecord
 } from "./boxes";
 import { ChainTransaction, GraphqlTokenInfo, ZcChainClient } from "./chainClient";
+import { ZC_PINNED_COMMIT, ZcKind } from "./contracts";
 import { ZcMarketBook } from "./matcher";
+import { ZcMarket } from "@/types/zc";
 
 const RETRY_BLOCKS = 30;
 const MAX_CHAIN_STEPS = 64;
 const MAX_CACHE_ENTRIES = 50_000;
+const MAX_PERSISTED_ENTRIES = 2_000;
+const DEFAULT_PERSIST_DEBOUNCE_MS = 1_000;
+const RESOLVER_CACHE_PREFIX = "sigmafi.zc.resolverCache.v1";
+
+const VALID_ZC_KINDS = new Set<ZcKind>([
+  "BondVault",
+  "FractionalVault",
+  "FractionalMint",
+  "DutchAuctionVault",
+  "WrapVault",
+  "WrapMint",
+  "Bond",
+  "Order",
+  "LendOffer",
+  "SaleOrder",
+  "PricedAsk",
+  "DutchAuctionMint",
+  "PricedOrder",
+  "LotAuction"
+]);
 
 export interface ChainRootInfo {
   readonly rootId: string;
   readonly initialValue: bigint;
+}
+
+export interface ResolverStorageLike {
+  getItem(key: string): string | null;
+  setItem(key: string, value: string): void;
+  removeItem(key: string): void;
+}
+
+export interface ZcResolverOptions {
+  readonly network?: string;
+  readonly storage?: ResolverStorageLike | null;
+  readonly persistDebounceMs?: number;
+}
+
+interface SerializedOrigin {
+  token: string;
+  kind: ZcKind;
+  market: ZcMarket | null;
+  txId: string;
+  height: number | null;
+  terms: string[];
+  held: { tokenId: string; amount: string } | null;
+}
+
+interface SerializedRoot {
+  rootId: string;
+  initialValue: string;
+}
+
+interface PersistedResolverPayload {
+  v: 1;
+  origins: [string, SerializedOrigin][];
+  scripts: [string, string][];
+  roots: [string, SerializedRoot][];
+}
+
+export function resolverCacheStorageKey(network: string): string {
+  const cleanNet = (network || "mainnet").trim().toLowerCase() || "mainnet";
+  return `${RESOLVER_CACHE_PREFIX}:${cleanNet}:${ZC_PINNED_COMMIT}`;
+}
+
+function defaultStorage(): ResolverStorageLike | null {
+  try {
+    return typeof localStorage !== "undefined" ? localStorage : null;
+  } catch {
+    return null;
+  }
 }
 
 function hashTreeHex(treeHex: string): string | null {
@@ -65,19 +134,79 @@ function predecessorOf(r: ZcRecord): string | null {
   return null;
 }
 
-function trimMap<K, V>(map: Map<K, V>): void {
-  if (map.size < MAX_CACHE_ENTRIES) return;
-  let drop = Math.floor(MAX_CACHE_ENTRIES / 8) + 1;
+function trimMap<K, V>(map: Map<K, V>, cap = MAX_CACHE_ENTRIES): void {
+  if (map.size < cap) return;
+  let drop = Math.max(1, map.size - cap + Math.floor(cap / 8) + 1);
   for (const k of map.keys()) {
     map.delete(k);
     if (--drop <= 0) break;
   }
 }
 
+function serializeOrigin(o: ZcOrigin): SerializedOrigin {
+  return {
+    token: o.token,
+    kind: o.kind,
+    market: o.market,
+    txId: o.txId,
+    height: o.height,
+    terms: o.terms.map((t) => t.toString()),
+    held: o.held ? { tokenId: o.held.tokenId, amount: o.held.amount.toString() } : null
+  };
+}
+
+function deserializeOrigin(raw: unknown): ZcOrigin | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.token !== "string" || !r.token) return null;
+  if (typeof r.kind !== "string" || !VALID_ZC_KINDS.has(r.kind as ZcKind)) return null;
+  if (r.market !== null && r.market !== "ERG" && r.market !== "SigUSD") return null;
+  if (typeof r.txId !== "string" || !r.txId) return null;
+  if (r.height !== null && typeof r.height !== "number") return null;
+  if (!Array.isArray(r.terms)) return null;
+
+  try {
+    const terms = r.terms.map((x) => BigInt(String(x)));
+    let held: { tokenId: string; amount: bigint } | null = null;
+    if (r.held !== null) {
+      if (!r.held || typeof r.held !== "object") return null;
+      const h = r.held as Record<string, unknown>;
+      if (typeof h.tokenId !== "string" || !h.tokenId) return null;
+      held = { tokenId: h.tokenId.toLowerCase(), amount: BigInt(String(h.amount)) };
+    }
+    return {
+      token: r.token.toLowerCase(),
+      kind: r.kind as ZcKind,
+      market: r.market as ZcMarket | null,
+      txId: r.txId.toLowerCase(),
+      height: r.height as number | null,
+      terms,
+      held
+    };
+  } catch {
+    return null;
+  }
+}
+
+function deserializeRoot(raw: unknown): ChainRootInfo | null {
+  if (!raw || typeof raw !== "object") return null;
+  const r = raw as Record<string, unknown>;
+  if (typeof r.rootId !== "string" || !r.rootId) return null;
+  try {
+    return {
+      rootId: r.rootId.toLowerCase(),
+      initialValue: BigInt(String(r.initialValue))
+    };
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Batched client-side port of Lithos-Client's ZcResolver.
  * Permanently caches verified token origins, disclosed party scripts, chain roots,
- * and token metadata, with a 30-block negative cache for unverified items.
+ * and token metadata, with a 30-block negative cache for unverified items and
+ * debounced `localStorage` persistence for immutable confirmed facts.
  */
 export class ZcResolver {
   private readonly origins = new Map<string, ZcOrigin>();
@@ -85,9 +214,21 @@ export class ZcResolver {
   private readonly roots = new Map<string, ChainRootInfo>();
   private readonly tokenMeta = new Map<string, GraphqlTokenInfo>();
   private readonly missing = new Map<string, number>();
+  private readonly storage: ResolverStorageLike | null;
+  private readonly persistDebounceMs: number;
+  private network: string;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private _generation = 0;
 
-  constructor(private readonly getClient: () => ZcChainClient) {}
+  constructor(
+    private readonly getClient: () => ZcChainClient,
+    options: ZcResolverOptions = {}
+  ) {
+    this.storage = options.storage === undefined ? defaultStorage() : options.storage;
+    this.persistDebounceMs = Math.max(0, options.persistDebounceMs ?? DEFAULT_PERSIST_DEBOUNCE_MS);
+    this.network = (options.network || "mainnet").trim().toLowerCase() || "mainnet";
+    this.hydrateFromStorage();
+  }
 
   private get gql(): ZcChainClient {
     return this.getClient();
@@ -97,13 +238,152 @@ export class ZcResolver {
     return this._generation;
   }
 
-  clear(): void {
+  getNetwork(): string {
+    return this.network;
+  }
+
+  /**
+   * Switches the active network scope for persisted confirmed facts.
+   * When switching networks, clears in-memory state and hydrates from the target network's cache.
+   */
+  setNetwork(network: string): void {
+    const clean = (network || "mainnet").trim().toLowerCase() || "mainnet";
+    if (clean === this.network) return;
+    this.cancelPersistTimer();
+    this.network = clean;
     this.origins.clear();
     this.scripts.clear();
     this.roots.clear();
     this.tokenMeta.clear();
     this.missing.clear();
     this._generation++;
+    this.hydrateFromStorage();
+  }
+
+  /**
+   * Clears transient negative-cache and token-metadata entries while keeping immutable
+   * confirmed origins, disclosed scripts, and chain roots intact across transport switches.
+   */
+  clearTransient(): void {
+    this.tokenMeta.clear();
+    this.missing.clear();
+  }
+
+  /**
+   * Clears in-memory resolver caches. Pass `{ purgePersisted: true }` to also delete the
+   * persisted `localStorage` entry for the current network.
+   */
+  clear(options?: { purgePersisted?: boolean }): void {
+    this.cancelPersistTimer();
+    this.origins.clear();
+    this.scripts.clear();
+    this.roots.clear();
+    this.tokenMeta.clear();
+    this.missing.clear();
+    this._generation++;
+    if (options?.purgePersisted && this.storage) {
+      try {
+        this.storage.removeItem(resolverCacheStorageKey(this.network));
+      } catch {
+        // storage unavailable
+      }
+    }
+  }
+
+  /**
+   * Immediately writes immutable confirmed caches (`origins`, `scripts`, `roots`) to storage.
+   */
+  flushPersistence(): void {
+    this.cancelPersistTimer();
+    this.writeToStorage();
+  }
+
+  private cancelPersistTimer(): void {
+    if (this.persistTimer !== null) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+  }
+
+  private schedulePersist(): void {
+    if (!this.storage) return;
+    if (this.persistDebounceMs === 0) {
+      this.writeToStorage();
+      return;
+    }
+    this.cancelPersistTimer();
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      this.writeToStorage();
+    }, this.persistDebounceMs);
+  }
+
+  private hydrateFromStorage(): void {
+    if (!this.storage) return;
+    try {
+      const raw = this.storage.getItem(resolverCacheStorageKey(this.network));
+      if (!raw) return;
+      const parsed = JSON.parse(raw) as Partial<PersistedResolverPayload>;
+      if (!parsed || parsed.v !== 1) return;
+
+      if (Array.isArray(parsed.origins)) {
+        for (const pair of parsed.origins.slice(-MAX_PERSISTED_ENTRIES)) {
+          if (!Array.isArray(pair) || pair.length !== 2) continue;
+          const [key, val] = pair;
+          if (typeof key !== "string" || !key) continue;
+          const origin = deserializeOrigin(val);
+          if (origin) this.origins.set(key.toLowerCase(), origin);
+        }
+      }
+
+      if (Array.isArray(parsed.scripts)) {
+        for (const pair of parsed.scripts.slice(-MAX_PERSISTED_ENTRIES)) {
+          if (!Array.isArray(pair) || pair.length !== 2) continue;
+          const [hash, tree] = pair;
+          if (typeof hash === "string" && typeof tree === "string" && hash && tree) {
+            this.scripts.set(hash.toLowerCase(), tree.toLowerCase());
+          }
+        }
+      }
+
+      if (Array.isArray(parsed.roots)) {
+        for (const pair of parsed.roots.slice(-MAX_PERSISTED_ENTRIES)) {
+          if (!Array.isArray(pair) || pair.length !== 2) continue;
+          const [boxId, val] = pair;
+          if (typeof boxId !== "string" || !boxId) continue;
+          const root = deserializeRoot(val);
+          if (root) this.roots.set(boxId.toLowerCase(), root);
+        }
+      }
+    } catch {
+      // ignore corrupted or inaccessible storage
+    }
+  }
+
+  private writeToStorage(): void {
+    if (!this.storage) return;
+    try {
+      const originsEntries = Array.from(this.origins.entries())
+        .slice(-MAX_PERSISTED_ENTRIES)
+        .map(([k, v]): [string, SerializedOrigin] => [k, serializeOrigin(v)]);
+      const scriptsEntries = Array.from(this.scripts.entries()).slice(-MAX_PERSISTED_ENTRIES);
+      const rootsEntries = Array.from(this.roots.entries())
+        .slice(-MAX_PERSISTED_ENTRIES)
+        .map(([k, v]): [string, SerializedRoot] => [
+          k,
+          { rootId: v.rootId, initialValue: v.initialValue.toString() }
+        ]);
+
+      const payload: PersistedResolverPayload = {
+        v: 1,
+        origins: originsEntries,
+        scripts: scriptsEntries,
+        roots: rootsEntries
+      };
+      this.storage.setItem(resolverCacheStorageKey(this.network), JSON.stringify(payload));
+    } catch {
+      // ignore quota / storage errors
+    }
   }
 
   private tried(key: string, height: number): boolean {
@@ -147,20 +427,25 @@ export class ZcResolver {
   }
 
   private rememberScripts(found: ReadonlyMap<string, string>): void {
+    let added = false;
     for (const [h, tree] of found) {
       if (!this.scripts.has(h)) {
         trimMap(this.scripts);
         this.scripts.set(h, tree);
         this._generation++;
+        added = true;
       }
     }
+    if (added) this.schedulePersist();
   }
 
   async resolveOrigins(
     tokenIds: readonly string[],
     height: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: { cacheMisses?: boolean }
   ): Promise<void> {
+    const cacheMisses = options?.cacheMisses ?? true;
     const needed: string[] = [];
     for (const raw of tokenIds) {
       const id = raw.toLowerCase();
@@ -171,17 +456,22 @@ export class ZcResolver {
     if (unique.length === 0) return;
 
     const boxes = await this.gql.fetchBoxesByIds(unique, signal);
+    let added = false;
     for (const id of unique) {
       const box = boxes.get(id);
       const orig = box ? mintedOrigin(box) : null;
       if (orig) {
         trimMap(this.origins);
-        if (!this.origins.has(id)) this._generation++;
+        if (!this.origins.has(id)) {
+          this._generation++;
+          added = true;
+        }
         this.origins.set(id, orig);
-      } else {
+      } else if (cacheMisses) {
         this.miss(`o:${id}`, height);
       }
     }
+    if (added) this.schedulePersist();
   }
 
   async resolveDisclosures(
@@ -248,8 +538,10 @@ export class ZcResolver {
   async resolveChainRoots(
     records: readonly ZcRecord[],
     height: number,
-    signal?: AbortSignal
+    signal?: AbortSignal,
+    options?: { cacheMisses?: boolean }
   ): Promise<void> {
+    const cacheMisses = options?.cacheMisses ?? true;
     interface Walk {
       at: ZcRecord;
       path: string[];
@@ -259,8 +551,11 @@ export class ZcResolver {
       if (this.roots.has(r.boxId)) continue;
       const pred = predecessorOf(r);
       if (pred === null) {
-        trimMap(this.roots);
-        this.roots.set(r.boxId, { rootId: r.boxId, initialValue: r.box.value });
+        if (cacheMisses) {
+          trimMap(this.roots);
+          this.roots.set(r.boxId, { rootId: r.boxId, initialValue: r.box.value });
+          this.schedulePersist();
+        }
         continue;
       }
       if (!this.tried(`c:${r.boxId}`, height)) {
@@ -286,12 +581,12 @@ export class ZcResolver {
         const predId = predecessorOf(w.at);
         if (!predId) {
           const root: ChainRootInfo = { rootId: w.at.boxId, initialValue: w.at.box.value };
-          this.cacheChain(w.at.boxId, w.path, root);
+          this.cacheChain(w.at.boxId, w.path, root, cacheMisses);
           continue;
         }
         const cached = this.roots.get(predId);
         if (cached) {
-          this.cacheChain(w.at.boxId, w.path, cached);
+          this.cacheChain(w.at.boxId, w.path, cached, cacheMisses);
           continue;
         }
         const found = boxes.get(predId);
@@ -306,16 +601,16 @@ export class ZcResolver {
           const nextPred = predecessorOf(linked);
           if (nextPred === null) {
             const root: ChainRootInfo = { rootId: linked.boxId, initialValue: linked.box.value };
-            this.cacheChain(linked.boxId, nextPath, root);
+            this.cacheChain(linked.boxId, nextPath, root, cacheMisses);
           } else {
             const hit = this.roots.get(nextPred);
             if (hit) {
-              this.cacheChain(linked.boxId, nextPath, hit);
+              this.cacheChain(linked.boxId, nextPath, hit, cacheMisses);
             } else if (!this.tried(`c:${linked.boxId}`, height)) {
               nextQueue.push({ at: linked, path: nextPath });
             }
           }
-        } else {
+        } else if (cacheMisses) {
           this.miss(`c:${w.at.boxId}`, height);
         }
       }
@@ -324,11 +619,22 @@ export class ZcResolver {
     }
   }
 
-  private cacheChain(headId: string, path: readonly string[], root: ChainRootInfo): void {
+  private cacheChain(
+    headId: string,
+    path: readonly string[],
+    root: ChainRootInfo,
+    persist = true
+  ): void {
     trimMap(this.roots);
+    let changed = !this.roots.has(headId);
     this.roots.set(headId, root);
     for (const id of path) {
+      if (!this.roots.has(id)) changed = true;
       this.roots.set(id, root);
+    }
+    if (changed && persist) {
+      this._generation++;
+      this.schedulePersist();
     }
   }
 
@@ -360,32 +666,58 @@ export class ZcResolver {
 
   /**
    * Batched warm-up pass for a freshly fetched market book: resolves unknown origins,
-   * script disclosures, and offer/ask chain roots in parallel GraphQL batches.
+   * script disclosures, and offer/ask chain roots in parallel batches.
+   *
+   * Mempool-safe: skips disclosure lookups for `pending: true` records (preventing wasted
+   * 404s and 30-block negative-cache poisoning before confirmation) and disables negative
+   * caching for origin/chain lookups referenced only by pending boxes.
    */
   async warmForBook(book: ZcMarketBook, signal?: AbortSignal): Promise<void> {
     const height = book.height;
-    const originIds: string[] = [];
-    for (const a of book.asks) originIds.push(a.record.token.tokenId);
-    for (const v of book.shareVaults.values()) {
-      originIds.push(v.record.shareId, v.record.bondAsset);
-    }
-    for (const asset of book.bonds.keys()) originIds.push(asset);
-    for (const asset of book.settlements.keys()) originIds.push(asset);
-    for (const receipt of book.wrapVaults.keys()) originIds.push(receipt);
+    const confirmedOriginSet = new Set<string>();
+    const pendingOriginSet = new Set<string>();
 
-    const chainRecords: ZcRecord[] = [];
+    const collectOrigin = (tokenId: string, pending: boolean) => {
+      const low = tokenId.toLowerCase();
+      if (pending) pendingOriginSet.add(low);
+      else confirmedOriginSet.add(low);
+    };
+
+    for (const a of book.asks) collectOrigin(a.record.token.tokenId, a.pending);
+    for (const v of book.shareVaults.values()) {
+      collectOrigin(v.record.shareId, v.pending);
+      collectOrigin(v.record.bondAsset, v.pending);
+    }
+    for (const [asset, b] of book.bonds) collectOrigin(asset, b.pending);
+    for (const [asset, s] of book.settlements) collectOrigin(asset, s.pending);
+    for (const [receipt, w] of book.wrapVaults) collectOrigin(receipt, w.pending);
+
+    const confirmedOriginIds = Array.from(confirmedOriginSet);
+    const pendingOnlyOriginIds = Array.from(pendingOriginSet).filter(
+      (id) => !confirmedOriginSet.has(id)
+    );
+
+    const confirmedChainRecords: ZcRecord[] = [];
+    const pendingChainRecords: ZcRecord[] = [];
     for (const o of book.offers) {
-      if (o.record.predecessor) chainRecords.push(o.record);
+      if (!o.record.predecessor) continue;
+      if (o.pending) pendingChainRecords.push(o.record);
+      else confirmedChainRecords.push(o.record);
     }
     for (const a of book.asks) {
-      if (a.record.predecessor) chainRecords.push(a.record);
+      if (!a.record.predecessor) continue;
+      if (a.pending) pendingChainRecords.push(a.record);
+      else confirmedChainRecords.push(a.record);
     }
 
+    // Only resolve creating-tx script disclosures for confirmed boxes (mempool txs are not in Explorer).
     const disclosureRecords: ZcRecord[] = [
-      ...book.orders.map((x) => x.record),
-      ...book.asks.map((x) => x.record),
-      ...book.offers.map((x) => x.record),
-      ...Array.from(book.bonds.values()).map((x) => x.record)
+      ...book.orders.filter((x) => !x.pending).map((x) => x.record),
+      ...book.asks.filter((x) => !x.pending).map((x) => x.record),
+      ...book.offers.filter((x) => !x.pending).map((x) => x.record),
+      ...Array.from(book.bonds.values())
+        .filter((x) => !x.pending)
+        .map((x) => x.record)
     ];
 
     // Step 1: resolve origins & chain roots in parallel (fail-soft on flaky endpoints)
@@ -398,24 +730,37 @@ export class ZcResolver {
     };
 
     await Promise.all([
-      soft(this.resolveOrigins(originIds, height, signal)),
-      soft(this.resolveChainRoots(chainRecords, height, signal))
+      soft(this.resolveOrigins(confirmedOriginIds, height, signal, { cacheMisses: true })),
+      pendingOnlyOriginIds.length > 0
+        ? soft(this.resolveOrigins(pendingOnlyOriginIds, height, signal, { cacheMisses: false }))
+        : Promise.resolve(),
+      soft(this.resolveChainRoots(confirmedChainRecords, height, signal, { cacheMisses: true })),
+      pendingChainRecords.length > 0
+        ? soft(this.resolveChainRoots(pendingChainRecords, height, signal, { cacheMisses: false }))
+        : Promise.resolve()
     ]);
 
     // Step 2: if any newly learned share mint holds a bond asset whose origin is unknown, resolve it too
-    const secondPassOrigins: string[] = [];
+    const secondPassConfirmed: string[] = [];
+    const secondPassPending: string[] = [];
     for (const a of book.asks) {
       const orig = this.knownOrigin(a.record.token.tokenId);
       if (orig?.held && !this.origins.has(orig.held.tokenId)) {
-        secondPassOrigins.push(orig.held.tokenId);
+        if (a.pending) secondPassPending.push(orig.held.tokenId);
+        else secondPassConfirmed.push(orig.held.tokenId);
       }
     }
+    const secondConfirmedSet = new Set(secondPassConfirmed);
+    const secondPendingOnly = secondPassPending.filter((id) => !secondConfirmedSet.has(id));
 
     // Step 3: resolve script disclosures (after origins so bond fill txs are known) + any secondary origins
     await Promise.all([
       soft(this.resolveDisclosures(disclosureRecords, height, signal)),
-      secondPassOrigins.length > 0
-        ? soft(this.resolveOrigins(secondPassOrigins, height, signal))
+      secondPassConfirmed.length > 0
+        ? soft(this.resolveOrigins(secondPassConfirmed, height, signal, { cacheMisses: true }))
+        : Promise.resolve(),
+      secondPendingOnly.length > 0
+        ? soft(this.resolveOrigins(secondPendingOnly, height, signal, { cacheMisses: false }))
         : Promise.resolve()
     ]);
   }
