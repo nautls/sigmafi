@@ -105,7 +105,7 @@ onBeforeUnmount(() => document.removeEventListener("mousedown", onDocumentClick)
             </span>
           </router-link>
           <a
-            href="https://sigmafi.gitbook.io/sigmafi-docs/"
+            href="https://lithosprotocol.org/docs/sigmafi/overview"
             target="_blank"
             rel="noopener noreferrer"
             class="inline-flex items-center gap-1 rounded-full px-3 py-1.5 text-[13.5px] font-medium text-[color:var(--sf-muted)] transition-colors hover:bg-[color:var(--sf-well)] hover:text-[color:var(--sf-ink)]"
