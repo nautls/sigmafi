@@ -16,7 +16,7 @@ export const EXPLORER_URL =
  * while V1 remains fully usable. Set `DEFAULT_DISABLE_V2_TX_SIGNING` to `false`
  * (or override via `VITE_DISABLE_V2_TX_SIGNING=false`) when ready to enable live V2 transactions.
  */
-const DEFAULT_DISABLE_V2_TX_SIGNING = true;
+const DEFAULT_DISABLE_V2_TX_SIGNING = false;
 const envDisableV2TxSigning = import.meta.env?.VITE_DISABLE_V2_TX_SIGNING;
 export const DISABLE_V2_TX_SIGNING: boolean =
   envDisableV2TxSigning === "true"
