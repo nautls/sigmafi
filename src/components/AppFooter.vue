@@ -74,7 +74,7 @@ function openKYAModal() {
       <span class="footer-title">KYA</span>
       <a class="link link-hover" @click="openKYAModal">Know Your Assumptions</a>
       <a
-        href="https://sigmafi.gitbook.io/sigmafi-docs/"
+        href="https://lithosprotocol.org/docs/sigmafi/overview"
         target="_blank"
         class="link link-hover"
         rel="noopener noreferrer"

@@ -97,7 +97,7 @@ const ergBalance = computed(() => {
           </li>
           <li>
             <a
-              href="https://sigmafi.gitbook.io/sigmafi-docs/"
+              href="https://lithosprotocol.org/docs/sigmafi/overview"
               target="_blank"
               rel="noopener noreferrer"
               ><file-text-icon /> Docs</a

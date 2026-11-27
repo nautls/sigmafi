@@ -667,7 +667,7 @@ function openKya() {
             <ul class="mt-3 space-y-2">
               <li>
                 <a
-                  href="https://sigmafi.gitbook.io/sigmafi-docs/"
+                  href="https://lithosprotocol.org/docs/sigmafi/overview"
                   target="_blank"
                   rel="noopener noreferrer"
                   class="transition-colors hover:text-[color:var(--sf-ink)]"
